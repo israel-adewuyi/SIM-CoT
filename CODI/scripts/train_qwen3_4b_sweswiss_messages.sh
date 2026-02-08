@@ -28,7 +28,6 @@ python3 train.py \
   --model_max_length 4096 \
   --per_device_train_batch_size 1 \
   --gradient_accumulation_steps 16 \
-  --bf16 \
   --num_train_epochs 3 \
   --learning_rate 2e-4 \
   --max_grad_norm 1.0 \
@@ -36,7 +35,6 @@ python3 train.py \
   --lora_r 64 --lora_alpha 16 --lora_init \
   --save_strategy "epoch" \
   --save_total_limit 2 \
-  --save_safetensors False \
   --weight_decay 0.01 \
   --warmup_ratio 0.03 \
   --lr_scheduler_type "cosine" \
