@@ -287,23 +287,23 @@ class CODI(torch.nn.Module):
         self.model_args = model_args
         self.training_args = training_args
         self.model_name = model_args.model_name_or_path
+        if torch.cuda.is_available():
+            load_dtype = torch.bfloat16 if training_args.bf16 else torch.float16
+        else:
+            load_dtype = torch.float32
         # import pdb; pdb.set_trace()
         model_wrapper_class = AutoModelForCausalLM 
         if model_args.full_precision:
             self.codi = model_wrapper_class.from_pretrained(
                     self.model_name,
-                    torch_dtype=(
-                        torch.float16 if training_args.bf16 is False else torch.bfloat16
-                    ),
+                    torch_dtype=load_dtype,
                     attn_implementation="sdpa",
                     # resume_download=True,
                 )
         else:
             self.codi = model_wrapper_class.from_pretrained(
                     self.model_name,
-                    torch_dtype=(
-                        torch.float16 if training_args.bf16 is False else torch.bfloat16
-                    ),
+                    torch_dtype=load_dtype,
                     attn_implementation="sdpa",
                     # resume_download=True,
                     quantization_config=transformers.BitsAndBytesConfig(
@@ -318,9 +318,7 @@ class CODI(torch.nn.Module):
             if model_args.decoder_path:
                 self.decoder = model_wrapper_class.from_pretrained(
                     model_args.decoder_path,
-                    torch_dtype=(
-                        torch.float16 if training_args.bf16 is False else torch.bfloat16
-                    ),
+                    torch_dtype=load_dtype,
                     use_flash_attention_2=False,
                     resume_download=True,
                 )
@@ -338,9 +336,7 @@ class CODI(torch.nn.Module):
             else:
                 self.decoder = model_wrapper_class.from_pretrained(
                         self.model_name,
-                        torch_dtype=(
-                            torch.float16 if training_args.bf16 is False else torch.bfloat16
-                        ),
+                        torch_dtype=load_dtype,
                         # use_flash_attention_2=False,
                         # resume_download=True,
                     )
@@ -385,6 +381,9 @@ class CODI(torch.nn.Module):
             )
             if not self.prj_no_ln:
                 self.prj.add_module("ln", nn.LayerNorm(self.dim))
+            # Keep projector dtype aligned with the base model to avoid matmul dtype mismatches.
+            base_param = next(self.codi.parameters())
+            self.prj = self.prj.to(dtype=base_param.dtype, device=base_param.device)
                 
         # Losses
         self.print_loss = training_args.print_loss
@@ -448,6 +447,15 @@ class CODI(torch.nn.Module):
             self.load_state_dict(state_dict)
             print(f"Finished loading from {self.training_args.restore_from}")
 
+    @staticmethod
+    def _align_to_module(x: torch.Tensor, module: nn.Module) -> torch.Tensor:
+        if isinstance(module, nn.Identity):
+            return x
+        param = next(module.parameters(), None)
+        if param is None:
+            return x
+        return x.to(device=param.device, dtype=param.dtype)
+
     def forward(
         self,
         encoder_input_ids: torch.LongTensor = None,
@@ -502,6 +510,7 @@ class CODI(torch.nn.Module):
         
         if self.use_prj:
             with autocast(dtype=torch.bfloat16, enabled=True):
+                latent_embd = self._align_to_module(latent_embd, self.prj)
                 latent_embd = self.prj(latent_embd)
             # latent_embd = self.prj(latent_embd)
 
@@ -530,6 +539,7 @@ class CODI(torch.nn.Module):
             forward_idx += 1
 
             if self.model_args.decoder_path:
+                explain_embds = self._align_to_module(explain_embds, self.pj_in)
                 explain_embds = self.pj_in(explain_embds)
 
 
@@ -553,6 +563,7 @@ class CODI(torch.nn.Module):
                 explain_logits = explain_outputs.logits
 
                 if self.model_args.decoder_path:
+                    explain_logits = self._align_to_module(explain_logits, self.pj_out)
                     explain_logits = self.pj_out(explain_logits)
 
                 shift_explain_logits = explain_logits[..., :-1, :].contiguous()
@@ -626,6 +637,7 @@ class CODI(torch.nn.Module):
                 latent_embd = outputs.hidden_states[-1][:, -1, :].unsqueeze(1)
                 if self.use_prj:
                     with autocast(dtype=torch.bfloat16, enabled=True):
+                        latent_embd = self._align_to_module(latent_embd, self.prj)
                         latent_embd = self.prj(latent_embd)
                     # latent_embd = self.prj(latent_embd)
 
@@ -652,6 +664,7 @@ class CODI(torch.nn.Module):
                     )
 
                     if self.model_args.decoder_path:
+                        explain_embds = self._align_to_module(explain_embds, self.pj_in)
                         explain_embds = self.pj_in(explain_embds)
 
                     forward_idx += 1
@@ -672,6 +685,7 @@ class CODI(torch.nn.Module):
                         explain_logits = explain_outputs.logits
 
                         if self.model_args.decoder_path:
+                            explain_logits = self._align_to_module(explain_logits, self.pj_out)
                             explain_logits = self.pj_out(explain_logits)
 
                         shift_explain_logits = explain_logits[..., :-1, :].contiguous()

@@ -145,6 +145,19 @@ def extract_answer_number(sentence: str) -> float:
 def train():
     parser = transformers.HfArgumentParser((ModelArguments, DataArguments, TrainingArguments))
     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
+    require_cuda = os.environ.get("CODI_REQUIRE_CUDA", "0").lower() in {"1", "true", "yes"}
+    if require_cuda and not torch.cuda.is_available():
+        raise RuntimeError(
+            "CUDA is required but not available. "
+            "Check your runtime/container GPU visibility and CUDA setup."
+        )
+    if torch.cuda.is_available():
+        print(
+            f"[device] CUDA available: {torch.cuda.device_count()} GPU(s). "
+            f"Using device 0: {torch.cuda.get_device_name(0)}"
+        )
+    else:
+        print("[device] CUDA unavailable. Training will run on CPU.")
 
     ##########################
     #       Peft Model       #
@@ -699,6 +712,10 @@ def train():
                 self.instances = self.instances[:training_args.exp_data_num]
 
             print(f"{len(self.instances)} data in total...")
+            print(
+                f"[messages parse stats] rows={total_rows}, valid={len(self.instances)}, "
+                f"missing_field={missing_messages_field}, filtered_or_malformed={malformed_messages}"
+            )
             if len(self.instances) == 0:
                 msg = (
                     "No valid records found in message-style dataset. "

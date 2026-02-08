@@ -6,6 +6,7 @@ MODEL_NAME="${MODEL_NAME:-Qwen/Qwen3-4B-Thinking-2507}"
 HF_DATASET="${HF_DATASET:-SWE-Swiss/SWESwiss-SFT-Repair-4K}"
 HF_SPLIT="${HF_SPLIT:-train}"
 DECODER_PATH="${DECODER_PATH:-}"
+export CODI_REQUIRE_CUDA="${CODI_REQUIRE_CUDA:-1}"
 
 mkdir -p "${SAVE_DIR}"
 
@@ -13,6 +14,19 @@ EXTRA_ARGS=()
 if [[ -n "${DECODER_PATH}" ]]; then
   EXTRA_ARGS+=(--decoder_path "${DECODER_PATH}")
 fi
+
+python3 - <<'PY'
+import sys
+import torch
+
+if not torch.cuda.is_available():
+    print("ERROR: CUDA is not available. Refusing to run training on CPU.")
+    sys.exit(1)
+
+print(f"[precheck] CUDA OK: {torch.cuda.device_count()} GPU(s) visible.")
+for i in range(torch.cuda.device_count()):
+    print(f"[precheck] GPU {i}: {torch.cuda.get_device_name(i)}")
+PY
 
 python3 train.py \
   --output_dir "${SAVE_DIR}" \
@@ -28,6 +42,7 @@ python3 train.py \
   --model_max_length 4096 \
   --per_device_train_batch_size 1 \
   --gradient_accumulation_steps 16 \
+  --bf16 \
   --num_train_epochs 3 \
   --learning_rate 2e-4 \
   --max_grad_norm 1.0 \
