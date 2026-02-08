@@ -344,6 +344,88 @@ def train():
                 full_labels.extend([IGNORE_INDEX] * len(msg_ids))
         return full_ids, full_labels
 
+    def _split_reasoning_steps(reasoning_text: str) -> List[str]:
+        text = reasoning_text.strip()
+        if not text:
+            return []
+
+        line_steps = []
+        for line in text.splitlines():
+            step = line.strip()
+            if not step:
+                continue
+            step = re.sub(r"^[-*]\s+", "", step)
+            step = re.sub(r"^\d+[\)\.\:\-]\s+", "", step)
+            if step:
+                line_steps.append(step)
+
+        if len(line_steps) >= 2:
+            return line_steps
+
+        sentence_steps = [
+            s.strip()
+            for s in re.split(r"(?<=[\.\!\?])\s+", text)
+            if s.strip()
+        ]
+        if len(sentence_steps) >= 2:
+            return sentence_steps
+
+        chunk_steps = [s.strip() for s in re.split(r";\s+|,\s+", text) if s.strip()]
+        if len(chunk_steps) >= 2:
+            return chunk_steps
+
+        return [text]
+
+    def _extract_explain_steps_ids(
+        messages: Sequence[Dict[str, str]], eot_id: int
+    ) -> List[List[int]]:
+        max_steps = training_args.num_latent + 1
+        step_texts: List[str] = []
+
+        for msg in messages:
+            if not _is_trainable_message(msg):
+                continue
+            content = msg["content"]
+            think_blocks = re.findall(
+                r"<think>(.*?)</think>",
+                content,
+                flags=re.IGNORECASE | re.DOTALL,
+            )
+            for block in think_blocks:
+                step_texts.extend(_split_reasoning_steps(block))
+
+        if len(step_texts) == 0:
+            fallback_text = []
+            for msg in messages:
+                if _is_trainable_message(msg):
+                    text = re.sub(r"<[^>]+>", " ", msg["content"])
+                    fallback_text.append(text.strip())
+            step_texts = _split_reasoning_steps("\n".join([t for t in fallback_text if t]))
+
+        if len(step_texts) > max_steps:
+            step_texts = step_texts[: max_steps - 1] + [
+                " ".join(step_texts[max_steps - 1 :])
+            ]
+
+        step_ids: List[List[int]] = []
+        for step in step_texts:
+            step_text = step.strip()
+            if not step_text:
+                continue
+            ids = tokenizer.encode(
+                f"<think>{step_text}</think>",
+                add_special_tokens=False,
+            )
+            ids = ids + [eot_id]
+            step_ids.append(ids if len(ids) > 0 else [tokenizer.pad_token_id])
+
+        while len(step_ids) < max_steps:
+            step_ids.append([tokenizer.pad_token_id])
+
+        if len(step_ids) == 0:
+            step_ids = [[tokenizer.pad_token_id] for _ in range(max_steps)]
+        return step_ids[:max_steps]
+
     def _build_messages_training_instance(raw_messages: Sequence[Dict], bot_id: int, eot_id: int):
         messages = _normalise_messages(raw_messages)
         if len(messages) == 0:
@@ -383,6 +465,7 @@ def train():
         labels = torch.tensor([IGNORE_INDEX] + assistant_labels, dtype=torch.long)
         ref_input_ids = torch.tensor(full_ids, dtype=torch.long)
         ref_labels = torch.tensor(full_labels, dtype=torch.long)
+        explain_steps_ids = _extract_explain_steps_ids(messages, eot_id)
 
         return dict(
             encoder_input_ids=encoder_input_ids,
@@ -392,6 +475,7 @@ def train():
             ref_answer_position=first_target_idx,
             model_answer_position=1,
             ref_labels=ref_labels,
+            explain_steps_ids=explain_steps_ids,
         )
 
     class SupervisedDataset(Dataset):
@@ -548,7 +632,7 @@ def train():
         def __call__(self, instances: Sequence[Dict]) -> Dict[str, torch.Tensor]:
             encoder_input_ids, decoder_input_ids, ref_input_ids, labels, ref_answer_position, model_answer_position, ref_labels= \
                 tuple([instance[key] for instance in instances] for key in ("encoder_input_ids", "decoder_input_ids", "ref_input_ids", "labels", "ref_answer_position", "model_answer_position", "ref_labels"))
-        
+
             # pad left
             reversed_input_ids = [seq.flip(0) for seq in encoder_input_ids]
             encoder_input_ids = torch.nn.utils.rnn.pad_sequence(reversed_input_ids, batch_first=True, padding_value=self.tokenizer.pad_token_id).flip(1)
@@ -559,8 +643,8 @@ def train():
 
             decoder_input_ids = torch.nn.utils.rnn.pad_sequence(decoder_input_ids, batch_first=True, padding_value=self.tokenizer.pad_token_id)
             labels = torch.nn.utils.rnn.pad_sequence(labels, batch_first=True, padding_value=IGNORE_INDEX)
-          
-            return dict(
+
+            batch = dict(
                 encoder_input_ids=encoder_input_ids,
                 decoder_input_ids=decoder_input_ids,
                 ref_input_ids=ref_input_ids,
@@ -571,6 +655,27 @@ def train():
                 ref_attention_mask=ref_input_ids.ne(self.tokenizer.pad_token_id),
                 ref_labels=ref_labels,
             )
+
+            if "explain_steps_ids" in instances[0]:
+                explain_steps_ids = [instance["explain_steps_ids"] for instance in instances]
+                max_steps = max(len(sample) for sample in explain_steps_ids)
+                max_step_len = max(
+                    len(step)
+                    for sample in explain_steps_ids
+                    for step in sample
+                )
+                pad_id = self.tokenizer.pad_token_id
+                padded_steps = []
+                for sample in explain_steps_ids:
+                    sample_padded = []
+                    for step in sample:
+                        sample_padded.append(step + [pad_id] * (max_step_len - len(step)))
+                    while len(sample_padded) < max_steps:
+                        sample_padded.append([pad_id] * max_step_len)
+                    padded_steps.append(sample_padded)
+                batch["explain_steps_ids"] = torch.tensor(padded_steps, dtype=torch.long)
+
+            return batch
 
     def make_supervised_data_module(tokenizer, data_args) -> Dict:
         """Make dataset and collator for supervised fine-tuning."""

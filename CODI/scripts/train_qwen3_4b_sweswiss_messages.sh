@@ -5,8 +5,14 @@ SAVE_DIR="${SAVE_DIR:-./outputs}"
 MODEL_NAME="${MODEL_NAME:-Qwen/Qwen3-4B-Thinking-2507}"
 HF_DATASET="${HF_DATASET:-SWE-Swiss/SWESwiss-SFT-Repair-4K}"
 HF_SPLIT="${HF_SPLIT:-train}"
+DECODER_PATH="${DECODER_PATH:-}"
 
 mkdir -p "${SAVE_DIR}"
+
+EXTRA_ARGS=()
+if [[ -n "${DECODER_PATH}" ]]; then
+  EXTRA_ARGS+=(--decoder_path "${DECODER_PATH}")
+fi
 
 python3 train.py \
   --output_dir "${SAVE_DIR}" \
@@ -46,4 +52,5 @@ python3 train.py \
   --distill_loss_factor 10 \
   --ref_loss_factor 1.0 \
   --max_token_num 4096 \
-  --use_decoder False
+  --use_decoder True \
+  "${EXTRA_ARGS[@]}"

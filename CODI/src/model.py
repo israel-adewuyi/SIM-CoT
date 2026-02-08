@@ -459,6 +459,7 @@ class CODI(torch.nn.Module):
         model_answer_position: Optional[torch.LongTensor] = None,
         ref_attention_mask: Optional[torch.LongTensor] = None,
         ref_labels: torch.LongTensor = None,
+        explain_steps_ids: Optional[torch.LongTensor] = None,
         step: int = None,
         step_ratio: float = None
     ):
@@ -476,20 +477,28 @@ class CODI(torch.nn.Module):
             forward_idx = 0
             explain_loss_total = 0.0
             effective_steps_cnt = 0
-            if 'llama' in self.model_args.model_name_or_path.lower() or 'qwen' in self.model_args.model_name_or_path.lower():
-                steps_list = get_steps(ref_input_ids, self.num_latent+1)
-                steps_pad_list = pad_steps(steps_list)
-                # import pdb; pdb.set_trace()
-                # print()
-                # steps_list = pad_steps(steps_list)
-            elif 'gpt' in self.model_args.model_name_or_path.lower():
-                steps_list = get_steps(ref_input_ids, self.num_latent+1, start_ids=(16791, 9959), end_id=4211, 
-                                       eot_id=self.tokenizer.eos_token_id, pad_id=self.tokenizer.pad_token_id, 
-                                       stop_ids=(self.tokenizer.eos_token_id, self.tokenizer.pad_token_id))
-                steps_pad_list = pad_steps(steps_list, pad_id=self.tokenizer.pad_token_id)
-
+            if explain_steps_ids is not None:
+                steps_pad_list = explain_steps_ids.detach().cpu().tolist()
             else:
-                raise ValueError("no implementaion")
+                if 'llama' in self.model_args.model_name_or_path.lower() or 'qwen' in self.model_args.model_name_or_path.lower():
+                    steps_list = get_steps(ref_input_ids, self.num_latent+1)
+                    steps_pad_list = pad_steps(steps_list)
+                elif 'gpt' in self.model_args.model_name_or_path.lower():
+                    steps_list = get_steps(ref_input_ids, self.num_latent+1, start_ids=(16791, 9959), end_id=4211, 
+                                           eot_id=self.tokenizer.eos_token_id, pad_id=self.tokenizer.pad_token_id, 
+                                           stop_ids=(self.tokenizer.eos_token_id, self.tokenizer.pad_token_id))
+                    steps_pad_list = pad_steps(steps_list, pad_id=self.tokenizer.pad_token_id)
+                else:
+                    raise ValueError("no implementaion")
+
+            required_steps = self.num_latent + 1
+            pad_id = self.tokenizer.pad_token_id
+            for i, steps in enumerate(steps_pad_list):
+                if len(steps) == 0:
+                    steps = [[pad_id]]
+                if len(steps) < required_steps:
+                    steps = steps + [[pad_id] * len(steps[0])] * (required_steps - len(steps))
+                steps_pad_list[i] = steps[:required_steps]
         
         if self.use_prj:
             with autocast(dtype=torch.bfloat16, enabled=True):
