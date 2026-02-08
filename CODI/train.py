@@ -3,8 +3,9 @@ import copy
 import logging
 import os
 import re
+import ast
 from dataclasses import dataclass
-from typing import Dict, Optional, Sequence, List, Tuple
+from typing import Dict, Optional, Sequence, List, Tuple, Any
 import torch
 import json
 import transformers
@@ -273,26 +274,90 @@ def train():
     def _is_trainable_message(msg: Dict) -> bool:
         loss_mask = msg.get("loss_mask", None)
         if loss_mask is not None:
+            if isinstance(loss_mask, str):
+                if loss_mask.strip().lower() in {"true", "yes"}:
+                    return True
+                if loss_mask.strip().lower() in {"false", "no"}:
+                    return False
             return int(loss_mask) == 1
         return str(msg.get("role", "")).lower() == "assistant"
 
-    def _normalise_messages(raw_messages: Sequence[Dict]) -> List[Dict[str, str]]:
+    def _extract_text_content(content: Any) -> str:
+        if content is None:
+            return ""
+        if isinstance(content, str):
+            return content
+        if isinstance(content, dict):
+            if "text" in content:
+                return str(content["text"])
+            if "content" in content:
+                return str(content["content"])
+            return str(content)
+        if isinstance(content, list):
+            chunks = []
+            for item in content:
+                if isinstance(item, dict):
+                    if item.get("type", None) == "text":
+                        text = item.get("text", "")
+                        if text:
+                            chunks.append(str(text))
+                    elif "text" in item:
+                        chunks.append(str(item["text"]))
+                    elif "content" in item:
+                        chunks.append(str(item["content"]))
+                else:
+                    chunks.append(str(item))
+            return "\n".join([c for c in chunks if c.strip()])
+        return str(content)
+
+    def _coerce_messages(raw_messages: Any) -> List[Dict]:
+        if raw_messages is None:
+            return []
+        if isinstance(raw_messages, str):
+            parsed = None
+            try:
+                parsed = json.loads(raw_messages)
+            except Exception:
+                try:
+                    parsed = ast.literal_eval(raw_messages)
+                except Exception:
+                    return []
+            raw_messages = parsed
+
+        if isinstance(raw_messages, dict):
+            for key in ("messages", "conversation", "conversations", "chat"):
+                value = raw_messages.get(key, None)
+                if isinstance(value, list):
+                    raw_messages = value
+                    break
+
+        if not isinstance(raw_messages, list):
+            return []
+
+        normalized_list = []
+        for msg in raw_messages:
+            if isinstance(msg, dict):
+                normalized_list.append(msg)
+            elif isinstance(msg, (list, tuple)) and len(msg) >= 2:
+                normalized_list.append({"role": msg[0], "content": msg[1]})
+        return normalized_list
+
+    def _normalise_messages(raw_messages: Any) -> List[Dict[str, str]]:
+        raw_messages = _coerce_messages(raw_messages)
         normalized = []
         for msg in raw_messages:
             if not isinstance(msg, dict):
                 continue
             role = str(msg.get("role", "")).lower().strip()
-            content = msg.get("content", "")
-            if content is None:
-                content = ""
-            content = str(content)
+            content = _extract_text_content(msg.get("content", ""))
             if role == "" or content == "":
                 continue
+            loss_mask = msg.get("loss_mask", 1 if role == "assistant" else 0)
             normalized.append(
                 {
                     "role": role,
                     "content": content,
-                    "loss_mask": int(msg.get("loss_mask", 1 if role == "assistant" else 0)),
+                    "loss_mask": loss_mask,
                 }
             )
         return normalized
@@ -596,15 +661,37 @@ def train():
             super(MessagesSupervisedDataset, self).__init__()
             logging.warning("Formatting message-style inputs...")
             self.instances = []
+            missing_messages_field = 0
+            malformed_messages = 0
+            total_rows = 0
+
+            column_names = []
+            if hasattr(raw_data, "column_names"):
+                try:
+                    column_names = list(raw_data.column_names)
+                except Exception:
+                    column_names = []
 
             for num_iter, example in tqdm(enumerate(raw_data)):
+                total_rows += 1
                 if training_args.exp_mode and num_iter >= training_args.exp_data_num:
                     break
+                if not isinstance(example, dict):
+                    malformed_messages += 1
+                    continue
+                if messages_field not in example:
+                    missing_messages_field += 1
+                    continue
                 messages = example.get(messages_field, None)
-                if not isinstance(messages, list):
+                if messages is None:
+                    missing_messages_field += 1
+                    continue
+                if not isinstance(messages, (list, str, dict)):
+                    malformed_messages += 1
                     continue
                 instance = _build_messages_training_instance(messages, bot, eot)
                 if instance is None:
+                    malformed_messages += 1
                     continue
                 self.instances.append(instance)
 
@@ -613,9 +700,15 @@ def train():
 
             print(f"{len(self.instances)} data in total...")
             if len(self.instances) == 0:
-                raise ValueError(
+                msg = (
                     "No valid records found in message-style dataset. "
-                    "Please check `messages` format and filtering settings."
+                    f"`messages_field={messages_field}` rows={total_rows}, "
+                    f"missing_field={missing_messages_field}, malformed={malformed_messages}."
+                )
+                if len(column_names) > 0:
+                    msg += f" Available columns: {column_names}"
+                raise ValueError(
+                    msg
                 )
 
         def __len__(self):
