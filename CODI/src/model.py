@@ -66,6 +66,18 @@ class DataArguments:
     data_name: str = field(
         default=None, metadata={"help": "Path to the training data."}
     )
+    hf_dataset_name: str = field(
+        default="SWE-Swiss/SWESwiss-SFT-Repair-4K",
+        metadata={"help": "HF dataset id for message-style SFT data."},
+    )
+    hf_dataset_split: str = field(
+        default="train",
+        metadata={"help": "Dataset split to load from HF dataset."},
+    )
+    messages_field: str = field(
+        default="messages",
+        metadata={"help": "Field that stores chat message list."},
+    )
     debug_data: bool = field(
         default=False,
         metadata={
@@ -464,7 +476,7 @@ class CODI(torch.nn.Module):
             forward_idx = 0
             explain_loss_total = 0.0
             effective_steps_cnt = 0
-            if 'llama' in self.model_args.model_name_or_path.lower():
+            if 'llama' in self.model_args.model_name_or_path.lower() or 'qwen' in self.model_args.model_name_or_path.lower():
                 steps_list = get_steps(ref_input_ids, self.num_latent+1)
                 steps_pad_list = pad_steps(steps_list)
                 # import pdb; pdb.set_trace()
@@ -762,4 +774,3 @@ class CODI(torch.nn.Module):
             return {"loss": loss, "logits": logits, "ce_loss": ce_loss_total, "distill_loss": distill_loss_total, "ref_ce_loss": ref_ce_loss, 'explain_loss': explain_loss_total}
         else:
             return {"loss": loss, "logits": logits, "ce_loss": ce_loss_total, "distill_loss": distill_loss_total, "ref_ce_loss": ref_ce_loss}
-

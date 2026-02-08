@@ -3,29 +3,23 @@ import copy
 import logging
 import os
 import re
-import random
-from dataclasses import dataclass, field
-from typing import Dict, Optional, Sequence
+from dataclasses import dataclass
+from typing import Dict, Optional, Sequence, List, Tuple
 import torch
 import json
 import transformers
 from torch.utils.data import Dataset
 from transformers import Trainer
-from safetensors.torch import load_file
 from tqdm import tqdm
 from math import ceil
-from peft import PeftModel, LoraConfig, TaskType, get_peft_model
+from peft import LoraConfig, TaskType
 from datasets import load_dataset
-from functools import partial
-from tqdm import tqdm
 from src.model import (
     CODI,
     ModelArguments,
     DataArguments,
     TrainingArguments,
-    freeze_model
 )
-import json
 
 
 def _to_scalar(x):
@@ -95,14 +89,18 @@ class CustomTrainer(Trainer):
             for k, v in logs.items():
                 super().log({k: v})
 
-def _tokenize_fn(strings: Sequence[str], tokenizer: transformers.PreTrainedTokenizer) -> Dict:
+def _tokenize_fn(
+    strings: Sequence[str],
+    tokenizer: transformers.PreTrainedTokenizer,
+    max_length: Optional[int] = None,
+) -> Dict:
     """Tokenize a list of strings."""
     tokenized_list = [
         tokenizer(
             text,
             return_tensors="pt",
             padding="longest",
-            max_length=256,#training_args.model_max_length,
+            max_length=max_length,
             truncation=True,
             return_attention_mask=False
         )
@@ -150,6 +148,7 @@ def train():
     ##########################
     #       Peft Model       #
     ##########################
+    lora_config = None
     if model_args.lora_init:
         task_type = TaskType.CAUSAL_LM
         if any(name in model_args.model_name_or_path.lower() for name in ["llama", "mistral", "falcon", "qwen"]):
@@ -170,6 +169,8 @@ def train():
             target_modules=target_modules,
             init_lora_weights=True,
         )
+    elif training_args.use_lora:
+        raise ValueError("`--use_lora True` requires `--lora_init` in the current CODI training path.")
 
     # import pdb; pdb.set_trace()
     model = CODI(model_args, training_args, lora_config)
@@ -188,17 +189,22 @@ def train():
         if tokenizer.pad_token_id is None: # error handling
             tokenizer.pad_token_id = tokenizer.convert_tokens_to_ids('[PAD]')
 
-    def get_answer_token_position(tokens, answer_prompts, tokenizer):
-        #answer_prompt = torch.tensor([464, 3280, 318, 25])
-        # import pdb; pdb.set_trace()
+    def get_answer_token_position(tokens, answer_prompts):
         try:
-            match_indices = (tokens.unfold(0, len(answer_prompts[0]), 1) == answer_prompts[0]).all(dim=1).nonzero(as_tuple=True)[0].item()
-            answer_token_id = match_indices + len(answer_prompts[0])
-            return answer_token_id
+            for prompt in answer_prompts:
+                prompt_len = len(prompt)
+                if prompt_len == 0 or tokens.numel() < prompt_len:
+                    continue
+                match_indices = (
+                    (tokens.unfold(0, prompt_len, 1) == prompt)
+                    .all(dim=1)
+                    .nonzero(as_tuple=True)[0]
+                )
+                if match_indices.numel() > 0:
+                    return match_indices[0].item() + prompt_len
         except Exception:
-            breakpoint()
-        
-    # def get_steps_
+            pass
+        return 0
 
     def preprocess(
         sources: Sequence[str], 
@@ -209,9 +215,15 @@ def train():
         eot_id: int,
     ) -> Dict:
         print("Tokenizing inputs... This may take some time...")
-        sources_id = _tokenize_fn(sources, tokenizer)["input_ids"]
-        cot_id = _tokenize_fn(targets, tokenizer)["input_ids"]
-        answers_id = _tokenize_fn(answers, tokenizer)["input_ids"]
+        sources_id = _tokenize_fn(
+            sources, tokenizer, max_length=training_args.model_max_length
+        )["input_ids"]
+        cot_id = _tokenize_fn(
+            targets, tokenizer, max_length=training_args.model_max_length
+        )["input_ids"]
+        answers_id = _tokenize_fn(
+            answers, tokenizer, max_length=training_args.model_max_length
+        )["input_ids"]
 
         # add eos token to accomodate pretrained model's format
         if not training_args.remove_eos:
@@ -238,13 +250,19 @@ def train():
         else:
             answers_id = [torch.tensor([eot_id, tokenizer.eos_token_id] + x.numpy().tolist(), dtype=torch.long) for x in answers_id]
 
-        answer_prompts = [torch.tensor(tokenizer.encode("The answer is:")), torch.tensor(tokenizer.encode("The next step result is:"))]
+        answer_prompts = [
+            torch.tensor(tokenizer.encode("The answer is:")),
+            torch.tensor(tokenizer.encode("The next step result is:")),
+        ]
         if answer_prompts[0][0] == tokenizer.bos_token_id: # remove the bos
             answer_prompts[0] = answer_prompts[0][1:]
             answer_prompts[1] = answer_prompts[1][1:]
-        # import pdb; pdb.set_trace()
-        ref_answer_position = [get_answer_token_position(x, answer_prompts, tokenizer) for i, x in enumerate(ref_input_ids)]
-        model_answer_position = [get_answer_token_position(x, answer_prompts, tokenizer) for x in answers_id]
+        ref_answer_position = [
+            get_answer_token_position(x, answer_prompts) for x in ref_input_ids
+        ]
+        model_answer_position = [
+            get_answer_token_position(x, answer_prompts) for x in answers_id
+        ]
 
         ref_eos_position = [len(x)-1 for x in ref_input_ids]
         model_eos_position = [len(x)-1 for x in answers_id]
@@ -252,6 +270,129 @@ def train():
                     ref_answer_position=ref_answer_position, model_answer_position=model_answer_position, \
                         ref_eos_position=ref_eos_position, model_eos_position=model_eos_position, ref_labels=ref_labels)
 
+    def _is_trainable_message(msg: Dict) -> bool:
+        loss_mask = msg.get("loss_mask", None)
+        if loss_mask is not None:
+            return int(loss_mask) == 1
+        return str(msg.get("role", "")).lower() == "assistant"
+
+    def _normalise_messages(raw_messages: Sequence[Dict]) -> List[Dict[str, str]]:
+        normalized = []
+        for msg in raw_messages:
+            if not isinstance(msg, dict):
+                continue
+            role = str(msg.get("role", "")).lower().strip()
+            content = msg.get("content", "")
+            if content is None:
+                content = ""
+            content = str(content)
+            if role == "" or content == "":
+                continue
+            normalized.append(
+                {
+                    "role": role,
+                    "content": content,
+                    "loss_mask": int(msg.get("loss_mask", 1 if role == "assistant" else 0)),
+                }
+            )
+        return normalized
+
+    def _build_tokens_from_messages(
+        messages: Sequence[Dict[str, str]], tokenizer: transformers.PreTrainedTokenizer
+    ) -> Tuple[List[int], List[int]]:
+        use_chat_template = hasattr(tokenizer, "apply_chat_template") and bool(
+            getattr(tokenizer, "chat_template", None)
+        )
+        if use_chat_template:
+            full_ids: List[int] = []
+            full_labels: List[int] = []
+            for idx, msg in enumerate(messages):
+                partial_ids = tokenizer.apply_chat_template(
+                    list(messages[: idx + 1]),
+                    tokenize=True,
+                    add_generation_prompt=False,
+                )
+                if isinstance(partial_ids, torch.Tensor):
+                    partial_ids = partial_ids.tolist()
+
+                if partial_ids[: len(full_ids)] != full_ids:
+                    use_chat_template = False
+                    break
+
+                delta = partial_ids[len(full_ids) :]
+                full_ids = partial_ids
+                if _is_trainable_message(msg):
+                    full_labels.extend(delta)
+                else:
+                    full_labels.extend([IGNORE_INDEX] * len(delta))
+
+            if use_chat_template:
+                return full_ids, full_labels
+
+        full_ids = []
+        full_labels = []
+        for idx, msg in enumerate(messages):
+            role = msg["role"]
+            content = msg["content"].strip()
+            prefix = "System" if role == "system" else ("User" if role == "user" else "Assistant")
+            text = f"{prefix}: {content}\n"
+            msg_ids = tokenizer.encode(text, add_special_tokens=(idx == 0))
+            full_ids.extend(msg_ids)
+            if _is_trainable_message(msg):
+                full_labels.extend(msg_ids)
+            else:
+                full_labels.extend([IGNORE_INDEX] * len(msg_ids))
+        return full_ids, full_labels
+
+    def _build_messages_training_instance(raw_messages: Sequence[Dict], bot_id: int, eot_id: int):
+        messages = _normalise_messages(raw_messages)
+        if len(messages) == 0:
+            return None
+
+        full_ids, full_labels = _build_tokens_from_messages(messages, tokenizer)
+        if len(full_ids) == 0:
+            return None
+
+        if tokenizer.eos_token_id is not None and full_ids[-1] != tokenizer.eos_token_id:
+            full_ids.append(tokenizer.eos_token_id)
+            if _is_trainable_message(messages[-1]):
+                full_labels.append(tokenizer.eos_token_id)
+            else:
+                full_labels.append(IGNORE_INDEX)
+
+        if training_args.max_token_num and len(full_ids) > training_args.max_token_num:
+            return None
+
+        first_target_idx = None
+        for idx, label in enumerate(full_labels):
+            if label != IGNORE_INDEX:
+                first_target_idx = idx
+                break
+        if first_target_idx is None or first_target_idx >= len(full_ids):
+            return None
+
+        prompt_ids = full_ids[:first_target_idx]
+        assistant_ids = full_ids[first_target_idx:]
+        assistant_labels = full_labels[first_target_idx:]
+
+        if len(assistant_ids) == 0:
+            return None
+
+        encoder_input_ids = torch.tensor(prompt_ids + [bot_id], dtype=torch.long)
+        decoder_input_ids = torch.tensor([eot_id] + assistant_ids, dtype=torch.long)
+        labels = torch.tensor([IGNORE_INDEX] + assistant_labels, dtype=torch.long)
+        ref_input_ids = torch.tensor(full_ids, dtype=torch.long)
+        ref_labels = torch.tensor(full_labels, dtype=torch.long)
+
+        return dict(
+            encoder_input_ids=encoder_input_ids,
+            decoder_input_ids=decoder_input_ids,
+            ref_input_ids=ref_input_ids,
+            labels=labels,
+            ref_answer_position=first_target_idx,
+            model_answer_position=1,
+            ref_labels=ref_labels,
+        )
 
     class SupervisedDataset(Dataset):
         QUESTION_PROMPT = "\nAnswer the above question. First think step by step and then answer the final number.\n"
@@ -266,8 +407,12 @@ def train():
             operators = ["+", "-", "*", "/"]
 
             token_nums = []
-            # import pdb; pdb.set_trace()
-            raw_data = read_json('/mnt/shared-storage-user/weixilin/MLLM/coconut/data/gsm_train_clean.json')            
+            if raw_data is None:
+                raw_data = read_json(training_args.icot_train_path)
+                if raw_data is None:
+                    raise FileNotFoundError(
+                        f"Could not load icot data from `{training_args.icot_train_path}`."
+                    )
             for num_iter, example in tqdm(enumerate(raw_data)):
                 if 'cot' not in example: 
                     example['cot'] = example['steps']
@@ -362,6 +507,39 @@ def train():
         def __getitem__(self, i) -> Dict[str, torch.Tensor]:
             return {key: self.data_dict[key][i] for key in self.keys}
 
+    class MessagesSupervisedDataset(Dataset):
+        def __init__(self, raw_data, tokenizer, bot, eot, messages_field: str):
+            super(MessagesSupervisedDataset, self).__init__()
+            logging.warning("Formatting message-style inputs...")
+            self.instances = []
+
+            for num_iter, example in tqdm(enumerate(raw_data)):
+                if training_args.exp_mode and num_iter >= training_args.exp_data_num:
+                    break
+                messages = example.get(messages_field, None)
+                if not isinstance(messages, list):
+                    continue
+                instance = _build_messages_training_instance(messages, bot, eot)
+                if instance is None:
+                    continue
+                self.instances.append(instance)
+
+            if training_args.exp_mode:
+                self.instances = self.instances[:training_args.exp_data_num]
+
+            print(f"{len(self.instances)} data in total...")
+            if len(self.instances) == 0:
+                raise ValueError(
+                    "No valid records found in message-style dataset. "
+                    "Please check `messages` format and filtering settings."
+                )
+
+        def __len__(self):
+            return len(self.instances)
+
+        def __getitem__(self, i) -> Dict[str, torch.Tensor]:
+            return self.instances[i]
+
     @dataclass
     class DataCollatorForSupervisedDataset(object):
         """Collate examples for supervised fine-tuning."""
@@ -397,23 +575,40 @@ def train():
     def make_supervised_data_module(tokenizer, data_args) -> Dict:
         """Make dataset and collator for supervised fine-tuning."""
         logging.warning("Downloading Data")
-        if "icot" in data_args.data_name:
+        data_name = (data_args.data_name or "").lower()
+        if "sweswiss" in data_name or "messages" in data_name:
+            dataset = load_dataset(
+                data_args.hf_dataset_name,
+                split=data_args.hf_dataset_split,
+            )
+            if data_args.debug_data:
+                dataset = dataset.select(range(min(len(dataset), 64)))
+            train_dataset = MessagesSupervisedDataset(
+                raw_data=dataset,
+                tokenizer=tokenizer,
+                bot=model.bot_id,
+                eot=model.eot_id,
+                messages_field=data_args.messages_field,
+            )
+            data_collator = DataCollatorForSupervisedDataset(tokenizer=tokenizer)
+            return dict(train_dataset=train_dataset, eval_dataset=None, data_collator=data_collator)
+        elif "icot" in data_name:
             # dataset = load_dataset("zen-E/GSM8k-Aug")["train"]
             dataset = None
             train_dataset = SupervisedDataset(data_name=data_args.data_name, raw_data=dataset, tokenizer=tokenizer, bot=model.bot_id, eot=model.eot_id)
             data_collator = DataCollatorForSupervisedDataset(tokenizer=tokenizer)
             return dict(train_dataset=train_dataset, eval_dataset=None, data_collator=data_collator)
-        elif "strategy" in data_args.data_name:
+        elif "strategy" in data_name:
             dataset = load_dataset("zen-E/StrategyQA_CoT_GPT4o")["train"]
             train_dataset = SupervisedDataset(data_name=data_args.data_name, raw_data=dataset, tokenizer=tokenizer, bot=model.bot_id, eot=model.eot_id)
             data_collator = DataCollatorForSupervisedDataset(tokenizer=tokenizer)
             return dict(train_dataset=train_dataset, eval_dataset=None, data_collator=data_collator)
-        elif "commonsense" in data_args.data_name:
+        elif "commonsense" in data_name:
             dataset = load_dataset("zen-E/CommonsenseQA-GPT4omini")["train"]
             train_dataset = SupervisedDataset(data_name=data_args.data_name, raw_data=dataset, tokenizer=tokenizer, bot=model.bot_id, eot=model.eot_id)
             data_collator = DataCollatorForSupervisedDataset(tokenizer=tokenizer)
             return dict(train_dataset=train_dataset, eval_dataset=None, data_collator=data_collator)
-        elif "prontoqa" in data_args.data_name:
+        elif "prontoqa" in data_name:
             with open("/home/ubuntu/coconut/data/prontoqa_train.json") as f:
                 dataset = json.load(f)
             train_dataset = SupervisedDataset(data_name=data_args.data_name, raw_data=dataset, tokenizer=tokenizer, bot=model.bot_id, eot=model.eot_id)
