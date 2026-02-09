@@ -360,6 +360,9 @@ class CODI(torch.nn.Module):
         self.codi.resize_token_embeddings(
             ori_vocab_size + 3
         )  # dummy values for mem tokens
+        if model_args.use_decoder and not model_args.decoder_path:
+            # Keep decoder vocab aligned with codi vocab for explain-loss labels.
+            self.decoder.resize_token_embeddings(ori_vocab_size + 3)
 
         self.dim = self.codi.config.hidden_size
         self.num_latent = training_args.num_latent
@@ -455,6 +458,14 @@ class CODI(torch.nn.Module):
         if param is None:
             return x
         return x.to(device=param.device, dtype=param.dtype)
+
+    @staticmethod
+    def _sanitize_ce_targets(targets: torch.Tensor, n_classes: int) -> torch.Tensor:
+        invalid = (targets != -100) & ((targets < 0) | (targets >= n_classes))
+        if invalid.any():
+            targets = targets.clone()
+            targets[invalid] = -100
+        return targets
 
     def forward(
         self,
@@ -571,6 +582,9 @@ class CODI(torch.nn.Module):
 
                 shift_explain_labels = explain_labels[..., 1:].contiguous()
                 shift_explain_labels = shift_explain_labels.view(-1)
+                shift_explain_labels = self._sanitize_ce_targets(
+                    shift_explain_labels, shift_explain_logits.size(-1)
+                )
                         
                 if (shift_explain_labels != -100).sum() == 0:
                     explain_loss = torch.tensor(0.0, device=shift_explain_logits.device)
@@ -693,6 +707,9 @@ class CODI(torch.nn.Module):
 
                         shift_explain_labels = explain_labels[..., 1:].contiguous()
                         shift_explain_labels = shift_explain_labels.view(-1)
+                        shift_explain_labels = self._sanitize_ce_targets(
+                            shift_explain_labels, shift_explain_logits.size(-1)
+                        )
                         if (shift_explain_labels != -100).sum() == 0:
                             explain_loss = torch.tensor(0.0, device=shift_explain_logits.device)
                         else:    
@@ -750,7 +767,10 @@ class CODI(torch.nn.Module):
                         logits = outputs.logits
                         effective_logits = logits[:, :-1, :]
                         effective_logits = effective_logits.reshape(-1, logits.size(-1))
-                        target_ids = labels[:, 1:].reshape(-1)                        
+                        target_ids = labels[:, 1:].reshape(-1)
+                        target_ids = self._sanitize_ce_targets(
+                            target_ids, effective_logits.size(-1)
+                        )
                         ce_loss = self.loss_fct(effective_logits, target_ids)
                         ce_loss_total += ce_loss
 
@@ -760,6 +780,9 @@ class CODI(torch.nn.Module):
         effective_ref_logits = ref_logits[:, :-1, :]
         effective_ref_logits = effective_ref_logits.reshape(-1, ref_logits.size(-1))
         ref_target_ids = ref_labels[:, 1:].reshape(-1)
+        ref_target_ids = self._sanitize_ce_targets(
+            ref_target_ids, effective_ref_logits.size(-1)
+        )
         ref_ce_loss = self.loss_fct(effective_ref_logits, ref_target_ids)
         ref_ce_loss *= self.ref_loss_factor 
 
