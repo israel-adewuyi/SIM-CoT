@@ -450,6 +450,45 @@ class CODI(torch.nn.Module):
             self.load_state_dict(state_dict)
             print(f"Finished loading from {self.training_args.restore_from}")
 
+    @property
+    def config(self):
+        # Expose base model config for HF Trainer compatibility.
+        return self.codi.config
+
+    def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs=None):
+        if hasattr(self.codi, "gradient_checkpointing_enable"):
+            if gradient_checkpointing_kwargs:
+                self.codi.gradient_checkpointing_enable(
+                    gradient_checkpointing_kwargs=gradient_checkpointing_kwargs
+                )
+            else:
+                self.codi.gradient_checkpointing_enable()
+        if self.model_args.use_decoder and hasattr(self.decoder, "gradient_checkpointing_enable"):
+            if gradient_checkpointing_kwargs:
+                self.decoder.gradient_checkpointing_enable(
+                    gradient_checkpointing_kwargs=gradient_checkpointing_kwargs
+                )
+            else:
+                self.decoder.gradient_checkpointing_enable()
+
+    def gradient_checkpointing_disable(self):
+        if hasattr(self.codi, "gradient_checkpointing_disable"):
+            self.codi.gradient_checkpointing_disable()
+        if self.model_args.use_decoder and hasattr(self.decoder, "gradient_checkpointing_disable"):
+            self.decoder.gradient_checkpointing_disable()
+
+    def enable_input_require_grads(self):
+        if hasattr(self.codi, "enable_input_require_grads"):
+            self.codi.enable_input_require_grads()
+        if self.model_args.use_decoder and hasattr(self.decoder, "enable_input_require_grads"):
+            self.decoder.enable_input_require_grads()
+
+    def disable_input_require_grads(self):
+        if hasattr(self.codi, "disable_input_require_grads"):
+            self.codi.disable_input_require_grads()
+        if self.model_args.use_decoder and hasattr(self.decoder, "disable_input_require_grads"):
+            self.decoder.disable_input_require_grads()
+
     @staticmethod
     def _align_to_module(x: torch.Tensor, module: nn.Module) -> torch.Tensor:
         if isinstance(module, nn.Identity):
