@@ -6,6 +6,12 @@ MODEL_NAME="${MODEL_NAME:-Qwen/Qwen3-4B-Thinking-2507}"
 HF_DATASET="${HF_DATASET:-SWE-Swiss/SWESwiss-SFT-Repair-4K}"
 HF_SPLIT="${HF_SPLIT:-train}"
 DECODER_PATH="${DECODER_PATH:-}"
+MODEL_MAX_LENGTH="${MODEL_MAX_LENGTH:-4096}"
+MAX_TOKEN_NUM="${MAX_TOKEN_NUM:-4096}"
+NUM_LATENT="${NUM_LATENT:-4}"
+PER_DEVICE_TRAIN_BATCH_SIZE="${PER_DEVICE_TRAIN_BATCH_SIZE:-1}"
+GRADIENT_ACCUMULATION_STEPS="${GRADIENT_ACCUMULATION_STEPS:-16}"
+DDP_FIND_UNUSED_PARAMETERS="${DDP_FIND_UNUSED_PARAMETERS:-False}"
 export CODI_REQUIRE_CUDA="${CODI_REQUIRE_CUDA:-1}"
 
 mkdir -p "${SAVE_DIR}"
@@ -28,7 +34,20 @@ for i in range(torch.cuda.device_count()):
     print(f"[precheck] GPU {i}: {torch.cuda.get_device_name(i)}")
 PY
 
-python3 train.py \
+NPROC_PER_NODE="$(python3 - <<'PY'
+import torch
+print(torch.cuda.device_count())
+PY
+)"
+
+if [[ "${NPROC_PER_NODE}" -gt 1 ]]; then
+  LAUNCHER=(torchrun --standalone --nproc_per_node "${NPROC_PER_NODE}" train.py)
+  EXTRA_ARGS+=(--ddp_find_unused_parameters "${DDP_FIND_UNUSED_PARAMETERS}")
+else
+  LAUNCHER=(python3 train.py)
+fi
+
+"${LAUNCHER[@]}" \
   --output_dir "${SAVE_DIR}" \
   --expt_name qwen3-4b-sweswiss-messages \
   --logging_dir "${SAVE_DIR}/logs" \
@@ -39,9 +58,9 @@ python3 train.py \
   --hf_dataset_split "${HF_SPLIT}" \
   --messages_field messages \
   --seed 11 \
-  --model_max_length 4096 \
-  --per_device_train_batch_size 1 \
-  --gradient_accumulation_steps 16 \
+  --model_max_length "${MODEL_MAX_LENGTH}" \
+  --per_device_train_batch_size "${PER_DEVICE_TRAIN_BATCH_SIZE}" \
+  --gradient_accumulation_steps "${GRADIENT_ACCUMULATION_STEPS}" \
   --bf16 \
   --num_train_epochs 3 \
   --learning_rate 2e-4 \
@@ -55,7 +74,7 @@ python3 train.py \
   --lr_scheduler_type "cosine" \
   --do_train \
   --report_to tensorboard \
-  --num_latent 4 \
+  --num_latent "${NUM_LATENT}" \
   --logging_strategy "steps" \
   --use_prj True \
   --prj_dim 2560 \
@@ -64,6 +83,6 @@ python3 train.py \
   --remove_eos False \
   --distill_loss_factor 10 \
   --ref_loss_factor 1.0 \
-  --max_token_num 4096 \
+  --max_token_num "${MAX_TOKEN_NUM}" \
   --use_decoder True \
   "${EXTRA_ARGS[@]}"
