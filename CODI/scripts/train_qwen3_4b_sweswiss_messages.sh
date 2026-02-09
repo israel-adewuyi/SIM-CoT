@@ -12,7 +12,9 @@ NUM_LATENT="${NUM_LATENT:-4}"
 PER_DEVICE_TRAIN_BATCH_SIZE="${PER_DEVICE_TRAIN_BATCH_SIZE:-1}"
 GRADIENT_ACCUMULATION_STEPS="${GRADIENT_ACCUMULATION_STEPS:-16}"
 DDP_FIND_UNUSED_PARAMETERS="${DDP_FIND_UNUSED_PARAMETERS:-False}"
+GRADIENT_CHECKPOINTING="${GRADIENT_CHECKPOINTING:-True}"
 export CODI_REQUIRE_CUDA="${CODI_REQUIRE_CUDA:-1}"
+export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 
 mkdir -p "${SAVE_DIR}"
 
@@ -61,6 +63,7 @@ fi
   --model_max_length "${MODEL_MAX_LENGTH}" \
   --per_device_train_batch_size "${PER_DEVICE_TRAIN_BATCH_SIZE}" \
   --gradient_accumulation_steps "${GRADIENT_ACCUMULATION_STEPS}" \
+  --gradient_checkpointing "${GRADIENT_CHECKPOINTING}" \
   --bf16 \
   --num_train_epochs 3 \
   --learning_rate 2e-4 \

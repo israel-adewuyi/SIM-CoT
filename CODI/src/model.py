@@ -18,7 +18,7 @@ from safetensors.torch import load_file
 from transformers.modeling_outputs import ModelOutput
 import random
 import copy
-from torch.cuda.amp import autocast
+from torch import amp
 from typing import List, Sequence, Iterable, Union, Optional
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -520,7 +520,7 @@ class CODI(torch.nn.Module):
                 steps_pad_list[i] = steps[:required_steps]
         
         if self.use_prj:
-            with autocast(dtype=torch.bfloat16, enabled=True):
+            with amp.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=True):
                 latent_embd = self._align_to_module(latent_embd, self.prj)
                 latent_embd = self.prj(latent_embd)
             # latent_embd = self.prj(latent_embd)
@@ -558,11 +558,11 @@ class CODI(torch.nn.Module):
                 explain_loss_total += 0.0
             else:
                 
-                with autocast(dtype=torch.bfloat16):
+                with amp.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=True):
                     explain_outputs = self.decoder(
                         inputs_embeds=explain_embds,
                         attention_mask=explain_attention_mask,
-                        output_hidden_states=True
+                        output_hidden_states=False
                     )
 
                 
@@ -607,7 +607,12 @@ class CODI(torch.nn.Module):
 
         with torch.no_grad():
             ref_outputs = self.codi(input_ids=ref_input_ids, output_hidden_states=True, attention_mask=ref_attention_mask)
-        ref_outputs_with_grad = self.codi(input_ids=ref_input_ids, output_hidden_states=True, attention_mask=ref_attention_mask) 
+        # We only need logits here for ref CE loss, so keep hidden states off to reduce memory.
+        ref_outputs_with_grad = self.codi(
+            input_ids=ref_input_ids,
+            output_hidden_states=False,
+            attention_mask=ref_attention_mask,
+        ) 
         
         # Formatting for deprecated exps
         ref_outputs_list = [ref_outputs] 
@@ -644,13 +649,13 @@ class CODI(torch.nn.Module):
             for i in range(num_latent):
                 # Implicit CoT generation
                 # import pdb; pdb.set_trace()
-                with autocast(dtype=torch.bfloat16):
+                with amp.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=True):
                     outputs = self.codi(inputs_embeds=latent_embd, use_cache=True, output_hidden_states=True, past_key_values=past_key_values)
                 # outputs = self.codi(inputs_embeds=latent_embd, use_cache=True, output_hidden_states=True, past_key_values=past_key_values)
                 past_key_values = outputs.past_key_values
                 latent_embd = outputs.hidden_states[-1][:, -1, :].unsqueeze(1)
                 if self.use_prj:
-                    with autocast(dtype=torch.bfloat16, enabled=True):
+                    with amp.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=True):
                         latent_embd = self._align_to_module(latent_embd, self.prj)
                         latent_embd = self.prj(latent_embd)
                     # latent_embd = self.prj(latent_embd)
@@ -685,11 +690,11 @@ class CODI(torch.nn.Module):
                     if (explain_labels != -100).sum() == 0:
                         explain_loss_total += 0.0
                     else:
-                        with autocast(dtype=torch.bfloat16):
+                        with amp.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=True):
                             explain_outputs = self.decoder(
                                 inputs_embeds=explain_embds,
                                 attention_mask=explain_attention_mask,
-                                output_hidden_states=True
+                                output_hidden_states=False
                             )
                         # explain_outputs = self.decoder(
                         #     inputs_embeds=explain_embds,
@@ -734,7 +739,7 @@ class CODI(torch.nn.Module):
                         dynamic_mask = dynamic_mask.bool()
                     # Student task's output
 
-                    with autocast(dtype=torch.bfloat16):
+                    with amp.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=True):
                         outputs = self.codi(inputs_embeds=embds, use_cache=True, output_hidden_states=True, past_key_values=past_key_values, attention_mask=dynamic_mask) 
                     # outputs = self.codi(inputs_embeds=embds, use_cache=True, output_hidden_states=True, past_key_values=past_key_values, attention_mask=dynamic_mask) 
                     # Teacher task's output
