@@ -521,7 +521,9 @@ def train():
                 full_labels.append(IGNORE_INDEX)
 
         if training_args.max_token_num and len(full_ids) > training_args.max_token_num:
-            return None
+            # Keep the tail so we preserve assistant target tokens instead of dropping the sample.
+            full_ids = full_ids[-training_args.max_token_num :]
+            full_labels = full_labels[-training_args.max_token_num :]
 
         first_target_idx = None
         for idx, label in enumerate(full_labels):
@@ -714,7 +716,8 @@ def train():
             print(f"{len(self.instances)} data in total...")
             print(
                 f"[messages parse stats] rows={total_rows}, valid={len(self.instances)}, "
-                f"missing_field={missing_messages_field}, filtered_or_malformed={malformed_messages}"
+                f"missing_field={missing_messages_field}, filtered_or_malformed={malformed_messages}, "
+                f"max_token_num={training_args.max_token_num}"
             )
             if len(self.instances) == 0:
                 msg = (
