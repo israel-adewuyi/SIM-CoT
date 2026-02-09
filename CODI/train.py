@@ -845,7 +845,7 @@ def train():
     )
 
     data_module = make_supervised_data_module(tokenizer=tokenizer, data_args=data_args)
-    trainer = CustomTrainer(model=model, tokenizer=tokenizer, args=training_args, **data_module)
+    trainer = CustomTrainer(model=model, args=training_args, **data_module)
     trainer.train()
 
     # to avoid the error of saving the model
