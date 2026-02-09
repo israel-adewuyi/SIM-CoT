@@ -319,8 +319,8 @@ class CODI(torch.nn.Module):
                 self.decoder = model_wrapper_class.from_pretrained(
                     model_args.decoder_path,
                     torch_dtype=load_dtype,
-                    use_flash_attention_2=False,
-                    resume_download=True,
+                    attn_implementation="sdpa",
+                    # resume_download=True,
                 )
                 if self.codi.lm_head.in_features == self.decoder.lm_head.in_features:
                     self.pj_in = nn.Identity()
