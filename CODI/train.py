@@ -924,15 +924,6 @@ def train():
         else:
             raise NotImplementedError(f"Dataset {data_args.data_name} is not supported.")
 
-    training_args.output_dir = os.path.join(
-        training_args.output_dir,
-        training_args.expt_name,
-        model_args.model_name_or_path.split('/')[-1],
-        f"ep_{int(training_args.num_train_epochs)}",
-        f"lr_{training_args.learning_rate}",
-        f"seed_{training_args.seed}",
-    )
-
     data_module = make_supervised_data_module(tokenizer=tokenizer, data_args=data_args)
     trainer = CustomTrainer(model=model, args=training_args, **data_module)
     trainer.train()

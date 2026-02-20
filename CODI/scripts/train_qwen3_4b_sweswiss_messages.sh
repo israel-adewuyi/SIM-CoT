@@ -2,6 +2,7 @@
 set -euo pipefail
 
 SAVE_DIR="${SAVE_DIR:-./outputs}"
+RUN_NAME="${RUN_NAME:-qwen3-4b-sweswiss-messages}"
 MODEL_NAME="${MODEL_NAME:-Qwen/Qwen3-4B-Thinking-2507}"
 HF_DATASET="${HF_DATASET:-SWE-Swiss/SWESwiss-SFT-Repair-4K}"
 HF_SPLIT="${HF_SPLIT:-train}"
@@ -16,7 +17,7 @@ GRADIENT_CHECKPOINTING="${GRADIENT_CHECKPOINTING:-True}"
 export CODI_REQUIRE_CUDA="${CODI_REQUIRE_CUDA:-1}"
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 
-mkdir -p "${SAVE_DIR}"
+mkdir -p "${SAVE_DIR}" "${SAVE_DIR}/checkpoints/${RUN_NAME}" "${SAVE_DIR}/tb/${RUN_NAME}"
 
 EXTRA_ARGS=()
 if [[ -n "${DECODER_PATH}" ]]; then
@@ -50,10 +51,11 @@ else
 fi
 
 "${LAUNCHER[@]}" \
-  --output_dir "${SAVE_DIR}" \
-  --expt_name qwen3-4b-sweswiss-messages \
-  --logging_dir "${SAVE_DIR}/logs" \
+  --output_dir "${SAVE_DIR}/checkpoints/${RUN_NAME}" \
+  --expt_name "${RUN_NAME}" \
+  --logging_dir "${SAVE_DIR}/tb/${RUN_NAME}" \
   --logging_steps 10 \
+  --run_name "${RUN_NAME}" \
   --model_name_or_path "${MODEL_NAME}" \
   --data_name sweswiss \
   --hf_dataset_name "${HF_DATASET}" \
