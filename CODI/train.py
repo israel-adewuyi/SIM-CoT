@@ -151,10 +151,13 @@ class CustomTrainer(Trainer):
                 state_dict = self.model.state_dict()
             torch.save(state_dict, os.path.join(output_dir, "pytorch_model.bin"))
 
-            if getattr(self, "processing_class", None) is not None:
-                self.processing_class.save_pretrained(output_dir)
-            elif self.tokenizer is not None:
-                self.tokenizer.save_pretrained(output_dir)
+            processing = getattr(self, "processing_class", None)
+            if processing is not None:
+                processing.save_pretrained(output_dir)
+            else:
+                tok = getattr(self, "tokenizer", None)
+                if tok is not None:
+                    tok.save_pretrained(output_dir)
 
             torch.save(self.args, os.path.join(output_dir, "training_args.bin"))
             return
