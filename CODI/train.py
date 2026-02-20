@@ -795,10 +795,23 @@ def train():
         logging.warning("Downloading Data")
         data_name = (data_args.data_name or "").lower()
         if "sweswiss" in data_name or "messages" in data_name:
-            dataset = load_dataset(
-                data_args.hf_dataset_name,
-                split=data_args.hf_dataset_split,
-            )
+            local_data_path = data_args.hf_dataset_name
+            if os.path.isfile(local_data_path):
+                logging.warning(
+                    "Loading local message dataset from `%s` with split `%s`.",
+                    local_data_path,
+                    data_args.hf_dataset_split,
+                )
+                dataset = load_dataset(
+                    "json",
+                    data_files=local_data_path,
+                    split=data_args.hf_dataset_split,
+                )
+            else:
+                dataset = load_dataset(
+                    data_args.hf_dataset_name,
+                    split=data_args.hf_dataset_split,
+                )
             if data_args.debug_data:
                 dataset = dataset.select(range(min(len(dataset), 64)))
             train_dataset = MessagesSupervisedDataset(
