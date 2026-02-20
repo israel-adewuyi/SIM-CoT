@@ -71,7 +71,6 @@ fi
   --use_lora True \
   --lora_r 64 --lora_alpha 16 --lora_init \
   --save_strategy "epoch" \
-  --save_safetensors False \
   --save_total_limit 2 \
   --weight_decay 0.01 \
   --warmup_ratio 0.03 \

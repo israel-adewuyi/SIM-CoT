@@ -133,6 +133,28 @@ class CustomTrainer(Trainer):
             for k, v in logs.items():
                 super().log({k: v})
 
+    def _save(self, output_dir: Optional[str] = None, state_dict=None):
+        """Retry save with non-safetensors if shared-tensor safetensors save fails."""
+        try:
+            return super()._save(output_dir=output_dir, state_dict=state_dict)
+        except RuntimeError as e:
+            if "Some tensors share memory" not in str(e):
+                raise
+            logging.warning(
+                "safetensors save failed due to shared tensors; retrying with "
+                "save_safetensors=False for this checkpoint."
+            )
+            had_attr = hasattr(self.args, "save_safetensors")
+            old_value = getattr(self.args, "save_safetensors", None)
+            setattr(self.args, "save_safetensors", False)
+            try:
+                return super()._save(output_dir=output_dir, state_dict=state_dict)
+            finally:
+                if had_attr:
+                    setattr(self.args, "save_safetensors", old_value)
+                else:
+                    delattr(self.args, "save_safetensors")
+
 def _tokenize_fn(
     strings: Sequence[str],
     tokenizer: transformers.PreTrainedTokenizer,
