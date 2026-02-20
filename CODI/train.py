@@ -33,6 +33,49 @@ def _to_scalar(x):
         return x.detach().float().mean().item()
     # 已经是数字的情况
     return float(x)
+
+
+def _unwrap_to_hf_model(model: torch.nn.Module) -> torch.nn.Module:
+    """Best-effort unwrapping to the underlying HF causal LM."""
+    cur = model
+    visited = set()
+    while True:
+        obj_id = id(cur)
+        if obj_id in visited:
+            break
+        visited.add(obj_id)
+        if hasattr(cur, "codi"):
+            cur = cur.codi
+            continue
+        if hasattr(cur, "model"):
+            cur = cur.model
+            continue
+        if hasattr(cur, "base_model"):
+            cur = cur.base_model
+            continue
+        break
+    return cur
+
+
+def _has_tied_input_output_embeddings(model: torch.nn.Module) -> bool:
+    """Detect tied embedding/lm-head weights that break safetensors save_file()."""
+    try:
+        hf_model = _unwrap_to_hf_model(model)
+        get_inp = getattr(hf_model, "get_input_embeddings", None)
+        get_out = getattr(hf_model, "get_output_embeddings", None)
+        if get_inp is None or get_out is None:
+            return False
+        inp = get_inp()
+        out = get_out()
+        if inp is None or out is None:
+            return False
+        if not hasattr(inp, "weight") or not hasattr(out, "weight"):
+            return False
+        return inp.weight.data_ptr() == out.weight.data_ptr()
+    except Exception:
+        return False
+
+
 def read_json(file_path):
     """
     从指定路径读取JSON文件并返回对应的Python对象。
@@ -188,6 +231,13 @@ def train():
 
     # import pdb; pdb.set_trace()
     model = CODI(model_args, training_args, lora_config)
+    if getattr(training_args, "save_safetensors", True) and _has_tied_input_output_embeddings(model):
+        logging.warning(
+            "Detected tied input/output embeddings; setting --save_safetensors False "
+            "to avoid safetensors shared-tensor save failure."
+        )
+        training_args.save_safetensors = False
+
     tokenizer = transformers.AutoTokenizer.from_pretrained(
             model_args.model_name_or_path,
             token=model_args.token,
