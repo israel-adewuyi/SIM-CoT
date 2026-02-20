@@ -151,10 +151,13 @@ class CustomTrainer(Trainer):
                 state_dict = self.model.state_dict()
             torch.save(state_dict, os.path.join(output_dir, "pytorch_model.bin"))
 
-            if getattr(self, "processing_class", None) is not None:
-                self.processing_class.save_pretrained(output_dir)
-            elif self.tokenizer is not None:
-                self.tokenizer.save_pretrained(output_dir)
+            processing = getattr(self, "processing_class", None)
+            if processing is not None:
+                processing.save_pretrained(output_dir)
+            else:
+                tok = getattr(self, "tokenizer", None)
+                if tok is not None:
+                    tok.save_pretrained(output_dir)
 
             torch.save(self.args, os.path.join(output_dir, "training_args.bin"))
             return
@@ -923,15 +926,6 @@ def train():
             return dict(train_dataset=train_dataset, eval_dataset=None, data_collator=data_collator)
         else:
             raise NotImplementedError(f"Dataset {data_args.data_name} is not supported.")
-
-    training_args.output_dir = os.path.join(
-        training_args.output_dir,
-        training_args.expt_name,
-        model_args.model_name_or_path.split('/')[-1],
-        f"ep_{int(training_args.num_train_epochs)}",
-        f"lr_{training_args.learning_rate}",
-        f"seed_{training_args.seed}",
-    )
 
     data_module = make_supervised_data_module(tokenizer=tokenizer, data_args=data_args)
     trainer = CustomTrainer(model=model, args=training_args, **data_module)

@@ -4,10 +4,11 @@ set -euo pipefail
 SAVE_DIR="${SAVE_DIR:-./outputs}"
 MODEL_NAME="${MODEL_NAME:-Qwen/Qwen3-1.7B}"
 HF_DATASET="${HF_DATASET:-data/context_target_v1_train_messages.jsonl}"
+RUN_NAME="${RUN_NAME:-train_test}"
 HF_SPLIT="${HF_SPLIT:-train}"
 DECODER_PATH="${DECODER_PATH:-Qwen/Qwen3-0.6B}"
-MODEL_MAX_LENGTH="${MODEL_MAX_LENGTH:-8192}"
-MAX_TOKEN_NUM="${MAX_TOKEN_NUM:-8192}"
+MODEL_MAX_LENGTH="${MODEL_MAX_LENGTH:-1024}"
+MAX_TOKEN_NUM="${MAX_TOKEN_NUM:-1024}"
 NUM_LATENT="${NUM_LATENT:-4}"
 PER_DEVICE_TRAIN_BATCH_SIZE="${PER_DEVICE_TRAIN_BATCH_SIZE:-1}"
 GRADIENT_ACCUMULATION_STEPS="${GRADIENT_ACCUMULATION_STEPS:-16}"
@@ -16,7 +17,7 @@ GRADIENT_CHECKPOINTING="${GRADIENT_CHECKPOINTING:-True}"
 export CODI_REQUIRE_CUDA="${CODI_REQUIRE_CUDA:-1}"
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 
-mkdir -p "${SAVE_DIR}"
+mkdir -p "${SAVE_DIR}" "${SAVE_DIR}/checkpoints/${RUN_NAME}" "${SAVE_DIR}/tb/${RUN_NAME}"
 
 EXTRA_ARGS=()
 if [[ -n "${DECODER_PATH}" ]]; then
@@ -50,10 +51,11 @@ else
 fi
 
 "${LAUNCHER[@]}" \
-  --output_dir "${SAVE_DIR}" \
-  --expt_name qwen3-4b-sweswiss-messages \
-  --logging_dir "${SAVE_DIR}/logs" \
+  --output_dir "${SAVE_DIR}/checkpoints/${RUN_NAME}" \
+  --expt_name "${RUN_NAME}" \
+  --logging_dir "${SAVE_DIR}/tb/${RUN_NAME}" \
   --logging_steps 10 \
+  --run_name "${RUN_NAME}" \
   --model_name_or_path "${MODEL_NAME}" \
   --data_name sweswiss \
   --hf_dataset_name "${HF_DATASET}" \
