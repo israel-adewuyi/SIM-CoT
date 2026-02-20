@@ -2,16 +2,16 @@
 set -euo pipefail
 
 SAVE_DIR="${SAVE_DIR:-./outputs}"
-MODEL_NAME="${MODEL_NAME:-Qwen/Qwen3-4B-Thinking-2507}"
-HF_DATASET="${HF_DATASET:-SWE-Swiss/SWESwiss-SFT-Repair-4K}"
+MODEL_NAME="${MODEL_NAME:-Qwen/Qwen3-1.7B}"
+HF_DATASET="${HF_DATASET:-data/context_target_v1_train_messages.jsonl}"
 HF_SPLIT="${HF_SPLIT:-train}"
-DECODER_PATH="${DECODER_PATH:-}"
-MODEL_MAX_LENGTH="${MODEL_MAX_LENGTH:-4096}"
-MAX_TOKEN_NUM="${MAX_TOKEN_NUM:-4096}"
+DECODER_PATH="${DECODER_PATH:-Qwen/Qwen3-0.6B}"
+MODEL_MAX_LENGTH="${MODEL_MAX_LENGTH:-8192}"
+MAX_TOKEN_NUM="${MAX_TOKEN_NUM:-8192}"
 NUM_LATENT="${NUM_LATENT:-4}"
 PER_DEVICE_TRAIN_BATCH_SIZE="${PER_DEVICE_TRAIN_BATCH_SIZE:-1}"
 GRADIENT_ACCUMULATION_STEPS="${GRADIENT_ACCUMULATION_STEPS:-16}"
-DDP_FIND_UNUSED_PARAMETERS="${DDP_FIND_UNUSED_PARAMETERS:-False}"
+DDP_FIND_UNUSED_PARAMETERS="${DDP_FIND_UNUSED_PARAMETERS:-True}"
 GRADIENT_CHECKPOINTING="${GRADIENT_CHECKPOINTING:-True}"
 export CODI_REQUIRE_CUDA="${CODI_REQUIRE_CUDA:-1}"
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
@@ -65,11 +65,11 @@ fi
   --gradient_accumulation_steps "${GRADIENT_ACCUMULATION_STEPS}" \
   --gradient_checkpointing "${GRADIENT_CHECKPOINTING}" \
   --bf16 \
-  --num_train_epochs 3 \
+  --num_train_epochs 1 \
   --learning_rate 2e-4 \
   --max_grad_norm 1.0 \
   --use_lora True \
-  --lora_r 64 --lora_alpha 16 --lora_init \
+  --lora_r 1 --lora_alpha 16 --lora_init \
   --save_strategy "epoch" \
   --save_total_limit 2 \
   --weight_decay 0.01 \
