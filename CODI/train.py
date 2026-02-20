@@ -4,6 +4,7 @@ import logging
 import os
 import re
 import ast
+from pathlib import Path
 from dataclasses import dataclass
 from typing import Dict, Optional, Sequence, List, Tuple, Any
 import torch
@@ -217,6 +218,21 @@ def extract_answer_number(sentence: str) -> float:
 def train():
     parser = transformers.HfArgumentParser((ModelArguments, DataArguments, TrainingArguments))
     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
+
+    output_dir_path = Path(training_args.output_dir).expanduser().resolve()
+    run_name = (getattr(training_args, "run_name", None) or "").strip()
+    if run_name and output_dir_path.parent.name == "checkpoints":
+        training_args.logging_dir = str(output_dir_path.parent.parent / "tb" / run_name)
+
+    if training_args.logging_dir:
+        training_args.logging_dir = str(Path(training_args.logging_dir).expanduser().resolve())
+        os.makedirs(training_args.logging_dir, exist_ok=True)
+
+    training_args.output_dir = str(output_dir_path)
+    os.makedirs(training_args.output_dir, exist_ok=True)
+    print(f"[paths] output_dir={training_args.output_dir}")
+    print(f"[paths] logging_dir={training_args.logging_dir}")
+
     require_cuda = os.environ.get("CODI_REQUIRE_CUDA", "0").lower() in {"1", "true", "yes"}
     if require_cuda and not torch.cuda.is_available():
         raise RuntimeError(
