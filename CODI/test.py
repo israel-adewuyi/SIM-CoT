@@ -188,6 +188,32 @@ def _messages_to_prompt(messages: List[Dict[str, Any]], tokenizer) -> str:
     lines.append("Assistant:")
     return "\n".join(lines)
 
+
+def _filter_examples_by_token_length(
+    question: List[str],
+    tokenizer,
+    max_token_num: int,
+    answer: Optional[List[Any]] = None,
+    generation_metadata: Optional[List[Dict[str, Any]]] = None,
+):
+    filtered_question = []
+    filtered_answer = [] if answer is not None else None
+    filtered_metadata = [] if generation_metadata is not None else None
+    dropped = 0
+
+    for idx, q in enumerate(question):
+        q_len = len(tokenizer.encode(q, add_special_tokens=True))
+        if q_len <= max_token_num:
+            filtered_question.append(q)
+            if filtered_answer is not None:
+                filtered_answer.append(answer[idx])
+            if filtered_metadata is not None:
+                filtered_metadata.append(generation_metadata[idx])
+        else:
+            dropped += 1
+
+    return filtered_question, filtered_answer, filtered_metadata, dropped
+
 def evaluation(model_args, data_args, training_args):
     if model_args.lora_init:
         task_type = TaskType.CAUSAL_LM
@@ -340,6 +366,25 @@ def evaluation(model_args, data_args, training_args):
             except ValueError:
                 ans = float("inf")
             answer.append(ans)
+
+    if training_args.max_token_num is not None and training_args.max_token_num > 0:
+        question, filtered_answer, filtered_metadata, dropped = _filter_examples_by_token_length(
+            question=question,
+            tokenizer=tokenizer,
+            max_token_num=training_args.max_token_num,
+            answer=answer if not is_messages_mode else None,
+            generation_metadata=generation_metadata if is_messages_mode else None,
+        )
+        if not is_messages_mode:
+            answer = filtered_answer if filtered_answer is not None else []
+        else:
+            generation_metadata = filtered_metadata if filtered_metadata is not None else []
+        logging.warning(
+            "Length filter max_token_num=%s: kept=%s, dropped=%s",
+            training_args.max_token_num,
+            len(question),
+            dropped,
+        )
 
     if len(question) == 0:
         raise ValueError("No valid evaluation examples found.")
