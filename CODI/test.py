@@ -17,7 +17,7 @@ import math
 import re
 import os
 from dataclasses import dataclass, field
-from typing import Dict, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence
 
 import torch
 import transformers
@@ -84,6 +84,110 @@ def write_json(data, file_path):
     except Exception as e:
         print(f"写入JSON文件时出错: {e}")
 
+
+def write_jsonl(data_list, file_path):
+    with open(file_path, "w", encoding="utf-8") as f:
+        for data in data_list:
+            json_line = json.dumps(data, ensure_ascii=False)
+            f.write(json_line + "\n")
+
+
+def _extract_text_content(content: Any) -> str:
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, dict):
+        if "text" in content:
+            return str(content["text"])
+        if "content" in content:
+            return str(content["content"])
+        return str(content)
+    if isinstance(content, list):
+        chunks = []
+        for item in content:
+            if isinstance(item, dict):
+                if item.get("type", None) == "text" and item.get("text", None):
+                    chunks.append(str(item["text"]))
+                elif "text" in item:
+                    chunks.append(str(item["text"]))
+                elif "content" in item:
+                    chunks.append(str(item["content"]))
+            else:
+                chunks.append(str(item))
+        return "\n".join([c for c in chunks if c.strip()])
+    return str(content)
+
+
+def _normalise_messages(raw_messages: Any) -> List[Dict[str, Any]]:
+    if isinstance(raw_messages, str):
+        raw_messages = json.loads(raw_messages)
+
+    if isinstance(raw_messages, dict):
+        for key in ("messages", "conversation", "conversations", "chat"):
+            value = raw_messages.get(key, None)
+            if isinstance(value, list):
+                raw_messages = value
+                break
+
+    if not isinstance(raw_messages, list):
+        return []
+
+    normalized: List[Dict[str, Any]] = []
+    for msg in raw_messages:
+        if not isinstance(msg, dict):
+            continue
+        role = str(msg.get("role", "")).lower().strip()
+        if role not in {"system", "user", "assistant"}:
+            continue
+        content = _extract_text_content(msg.get("content", "")).strip()
+        if content == "":
+            continue
+
+        raw_loss_mask = msg.get("loss_mask", 1 if role == "assistant" else 0)
+        if isinstance(raw_loss_mask, str):
+            lm = raw_loss_mask.strip().lower()
+            loss_mask = 1 if lm in {"1", "true", "yes"} else 0
+        elif isinstance(raw_loss_mask, bool):
+            loss_mask = int(raw_loss_mask)
+        elif isinstance(raw_loss_mask, (int, float)):
+            loss_mask = 1 if int(raw_loss_mask) == 1 else 0
+        else:
+            loss_mask = 1 if role == "assistant" else 0
+
+        normalized.append({"role": role, "content": content, "loss_mask": loss_mask})
+    return normalized
+
+
+def _messages_to_prompt(messages: List[Dict[str, Any]], tokenizer) -> str:
+    prompt_messages = [m for m in messages if int(m.get("loss_mask", 0)) != 1]
+    if len(prompt_messages) == 0 and len(messages) > 0:
+        if messages[-1].get("role", "") == "assistant":
+            prompt_messages = messages[:-1]
+        else:
+            prompt_messages = messages
+
+    if len(prompt_messages) == 0:
+        return ""
+
+    use_chat_template = hasattr(tokenizer, "apply_chat_template") and bool(
+        getattr(tokenizer, "chat_template", None)
+    )
+    if use_chat_template:
+        return tokenizer.apply_chat_template(
+            [{"role": m["role"], "content": m["content"]} for m in prompt_messages],
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+
+    lines = []
+    for msg in prompt_messages:
+        role = msg["role"]
+        prefix = "System" if role == "system" else ("User" if role == "user" else "Assistant")
+        lines.append(f"{prefix}: {msg['content']}")
+    lines.append("Assistant:")
+    return "\n".join(lines)
+
 def evaluation(model_args, data_args, training_args):
     if model_args.lora_init:
         task_type = TaskType.CAUSAL_LM
@@ -145,67 +249,100 @@ def evaluation(model_args, data_args, training_args):
     #      dataset       #
     ######################
     logging.warning("Downloading Data")
+    is_messages_mode = "messages" in (data_args.data_name or "").lower()
     question_name = "question"
     answer_name = "answer"
-    if "gsm-hard" == data_args.data_name:
-        # dataset = load_dataset("juyoung-trl/gsm-hard")
-        # test_set = dataset['train']
-        # question_name = "instruction"
-        # answer_name = "response"
-        test_set = read_json('/mnt/shared-storage-user/weixilin/MLLM/coconut/data/gsm8k_hard_format.json')
+    if is_messages_mode:
+        dataset_source = data_args.hf_dataset_name
+        if os.path.isfile(dataset_source):
+            test_set = load_dataset("json", data_files=dataset_source, split=data_args.hf_dataset_split)
+        else:
+            test_set = load_dataset(dataset_source, split=data_args.hf_dataset_split)
+    elif "gsm-hard" == data_args.data_name:
+        dataset = load_dataset("juyoung-trl/gsm-hard")
+        test_set = dataset['train']
+        question_name = "instruction"
+        answer_name = "response"
     elif "multi-arith" == data_args.data_name:
-        # dataset = load_dataset("ChilleD/MultiArith")
-        # test_set = dataset['test']
-        # answer_name = "final_ans"
-        test_set = read_json('/mnt/shared-storage-user/weixilin/MLLM/coconut/data/multiarith_format.json')
+        dataset = load_dataset("ChilleD/MultiArith")
+        test_set = dataset['test']
+        answer_name = "final_ans"
     elif "svamp" == data_args.data_name:
-        # dataset = load_dataset("ChilleD/SVAMP")
-        # test_set = concatenate_datasets([dataset["train"], dataset["test"]])
-        # question_name = "question_concat"
-        # answer_name = "Answer"
-        test_set = read_json('/mnt/shared-storage-user/weixilin/MLLM/coconut/data/svamp_format.json')
+        dataset = load_dataset("ChilleD/SVAMP")
+        test_set = concatenate_datasets([dataset["train"], dataset["test"]])
+        question_name = "question_concat"
+        answer_name = "Answer"
     elif "commonsense" == data_args.data_name:
         dataset = load_dataset("zen-E/CommonsenseQA-GPT4omini")
         test_set = dataset['validation']
     elif "gsm8k" == data_args.data_name:
-        # dataset = load_dataset("gsm8k", "main")
-        # test_set = dataset['test']
-        test_set = read_json('/mnt/shared-storage-user/weixilin/MLLM/coconut/data/gsm_test_clean.json')
-        # import pdb; pdb.set_trace()
-        # print()
+        dataset = load_dataset("gsm8k", "main")
+        test_set = dataset['test']
     else:
         raise NotImplementedError
 
     logging.warning("Formatting inputs...")
-    question = [f"{example[question_name].strip().replace('  ', ' ')}" for example in test_set]
+    question = []
     answer = []
+    generation_metadata = []
 
-    # get numerical answer
-    for example in test_set:
-        example = example[answer_name]
-        if isinstance(example, bool):
-            answer.append(example)
-            continue
-        if example in ["True", "False"]:
-            if example == "True":
-                ans = True
+    if is_messages_mode:
+        for idx, example in enumerate(test_set):
+            if data_args.messages_field not in example:
+                continue
+            messages = _normalise_messages(example[data_args.messages_field])
+            if len(messages) == 0:
+                continue
+            prompt_text = _messages_to_prompt(messages, tokenizer).strip()
+            if prompt_text == "":
+                continue
+            question.append(prompt_text)
+            generation_metadata.append(
+                {
+                    "example_index": idx,
+                    "sample_id": example.get("sample_id", None),
+                    "trajectory_id": example.get("trajectory_id", None),
+                    "assistant_turn_index": example.get("assistant_turn_index", None),
+                    "target_message_index": example.get("target_message_index", None),
+                    "source_path": example.get("source_path", None),
+                    "prompt_messages": [
+                        {"role": m["role"], "content": m["content"]}
+                        for m in messages
+                        if int(m.get("loss_mask", 0)) != 1
+                    ],
+                }
+            )
+    else:
+        question = [f"{example[question_name].strip().replace('  ', ' ')}" for example in test_set]
+        # get numerical answer
+        for example in test_set:
+            example = example[answer_name]
+            if isinstance(example, bool):
+                answer.append(example)
+                continue
+            if example in ["True", "False"]:
+                if example == "True":
+                    ans = True
+                else:
+                    ans = False
+                answer.append(ans)
+                continue
+            if example in "ABCDE":
+                answer.append(example)
+                continue
+            if "####" in example:
+                ans = example.split('####')[-1]
             else:
-                ans = False
+                ans = example
+            ans = ans.replace(',', '')  # handle numbers like 2,000
+            try:
+                ans = float(ans)
+            except ValueError:
+                ans = float("inf")
             answer.append(ans)
-            continue
-        if example in "ABCDE":
-            answer.append(example)
-            continue
-        if "####" in example:
-            ans = example.split('####')[-1]
-        else:
-            ans = example
-        ans = ans.replace(',', '')  # handle numbers like 2,000
-        try:
-            ans = float(ans)
-        except ValueError:
-            ans = float("inf")
-        answer.append(ans)
+
+    if len(question) == 0:
+        raise ValueError("No valid evaluation examples found.")
 
     logging.warning("Tokenizing inputs...")
     eval_step = math.ceil(len(question)/data_args.batch_size)
@@ -247,6 +384,7 @@ def evaluation(model_args, data_args, training_args):
     }
 
     ans_pred_list = []
+    generation_records = []
     ans_pred_list_accu_at_n_passes = []
     attention_map_weights = []
     attention_to_latents_against_len_sum = []
@@ -318,7 +456,6 @@ def evaluation(model_args, data_args, training_args):
             pred_tokens = [[] for _ in range(batch_size)]
             for i in range(gen_kwargs["max_new_tokens"]):
                 seq_len += 1
-                import pdb; pdb.set_trace()
                 out = model.codi(
                         inputs_embeds=output,
                         output_hidden_states=False,
@@ -383,17 +520,46 @@ def evaluation(model_args, data_args, training_args):
                     print(f"Q: {question[step*data_args.batch_size+mini_step]}")
                     print(decoded_pred)
                     print(f"Question {step*data_args.batch_size+mini_step} Ends")
-                    print(f"Prediction={extract_answer_number(decoded_pred)}; Groundtruth={answer[step*data_args.batch_size+mini_step]}")
+                    if not is_messages_mode:
+                        print(f"Prediction={extract_answer_number(decoded_pred)}; Groundtruth={answer[step*data_args.batch_size+mini_step]}")
                     print("")
-                ans_pred_list.append(extract_answer_number(decoded_pred))
-    write_json({"ans": ans_pred_list}, f"/mnt/shared-storage-user/weixilin/MLLM/coconut/codi/results/{data_args.data_name}.json")
+                if is_messages_mode:
+                    sample_idx = step * data_args.batch_size + mini_step
+                    generation_record = {
+                        "sample_idx": sample_idx,
+                        "prompt": question[sample_idx],
+                        "generated_text": decoded_pred,
+                        "generated_token_ids": pred_token,
+                    }
+                    if sample_idx < len(generation_metadata):
+                        generation_record.update(generation_metadata[sample_idx])
+                    generation_records.append(generation_record)
+                else:
+                    ans_pred_list.append(extract_answer_number(decoded_pred))
+
+    os.makedirs(training_args.output_dir, exist_ok=True)
+    if is_messages_mode:
+        output_jsonl = os.path.join(training_args.output_dir, f"{data_args.data_name}_generations.jsonl")
+        write_jsonl(generation_records, output_jsonl)
+        print(f"Saved {len(generation_records)} generations to {output_jsonl}")
+        return None
+
+    write_json({"ans": ans_pred_list}, os.path.join(training_args.output_dir, f"{data_args.data_name}_predictions.json"))
     accuracy = compute_accuracy(answer, ans_pred_list)
 
     print(f"adapter: {model_args.adapter_name_or_path} | GSM8K test accuracy: {100*accuracy:.2f}% | ")
     print(f"average length of COT: {sum(len_cot)/len(len_cot)}")
     # import pdb; pdb.set_trace()
     if model_args.save_ablation:
-        save_jsonl_line(f"/mnt/shared-storage-user/weixilin/MLLM/coconut/codi/results/{data_args.data_name}.jsonl", {'model_name': '-'.join(model_args.ckpt_dir.split('/')[5:]), 'data_name': data_args.data_name, 'soft_weight': model_args.soft_weight, 'acc.': accuracy})
+        save_jsonl_line(
+            os.path.join(training_args.output_dir, f"{data_args.data_name}_metrics.jsonl"),
+            {
+                'model_name': os.path.basename(model_args.ckpt_dir.rstrip('/')),
+                'data_name': data_args.data_name,
+                'soft_weight': model_args.soft_weight,
+                'acc.': accuracy
+            }
+        )
     return 100*accuracy
 
 def extract_answer_number(sentence: str) -> float:
@@ -440,5 +606,9 @@ if __name__ == "__main__":
     accu_list = []
     for i in range(training_args.inf_num_iterations):
         accu = evaluation(model_args, data_args, training_args)
-        accu_list.append(accu)
-    print(f"Average accuracy over {training_args.inf_num_iterations} sampling: {sum(accu_list)/len(accu_list)}")
+        if accu is not None:
+            accu_list.append(accu)
+    if len(accu_list) > 0:
+        print(f"Average accuracy over {training_args.inf_num_iterations} sampling: {sum(accu_list)/len(accu_list)}")
+    else:
+        print("Generation-only evaluation finished.")
