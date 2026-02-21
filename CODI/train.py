@@ -224,9 +224,15 @@ def train():
     if run_name and output_dir_path.parent.name == "checkpoints":
         training_args.logging_dir = str(output_dir_path.parent.parent / "tb" / run_name)
 
+    if not training_args.logging_dir:
+        tb_logging_dir = os.environ.get("TENSORBOARD_LOGGING_DIR", "").strip()
+        if tb_logging_dir:
+            training_args.logging_dir = tb_logging_dir
+
     if training_args.logging_dir:
         training_args.logging_dir = str(Path(training_args.logging_dir).expanduser().resolve())
         os.makedirs(training_args.logging_dir, exist_ok=True)
+        os.environ["TENSORBOARD_LOGGING_DIR"] = training_args.logging_dir
 
     training_args.output_dir = str(output_dir_path)
     os.makedirs(training_args.output_dir, exist_ok=True)

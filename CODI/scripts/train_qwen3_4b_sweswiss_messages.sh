@@ -5,6 +5,7 @@ SAVE_DIR="${SAVE_DIR:-./outputs}"
 MODEL_NAME="${MODEL_NAME:-Qwen/Qwen3-1.7B}"
 HF_DATASET="${HF_DATASET:-data/context_target_v1_train_messages.jsonl}"
 RUN_NAME="${RUN_NAME:-train_test}"
+TB_LOG_DIR="${TB_LOG_DIR:-${SAVE_DIR}/tb/${RUN_NAME}}"
 HF_SPLIT="${HF_SPLIT:-train}"
 DECODER_PATH="${DECODER_PATH:-Qwen/Qwen3-0.6B}"
 MODEL_MAX_LENGTH="${MODEL_MAX_LENGTH:-1024}"
@@ -18,6 +19,7 @@ export CODI_REQUIRE_CUDA="${CODI_REQUIRE_CUDA:-1}"
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 
 mkdir -p "${SAVE_DIR}" "${SAVE_DIR}/checkpoints/${RUN_NAME}" "${SAVE_DIR}/tb/${RUN_NAME}"
+export TENSORBOARD_LOGGING_DIR="${TB_LOG_DIR}"
 
 EXTRA_ARGS=()
 if [[ -n "${DECODER_PATH}" ]]; then
@@ -53,7 +55,6 @@ fi
 "${LAUNCHER[@]}" \
   --output_dir "${SAVE_DIR}/checkpoints/${RUN_NAME}" \
   --expt_name "${RUN_NAME}" \
-  --logging_dir "${SAVE_DIR}/tb/${RUN_NAME}" \
   --logging_steps 10 \
   --run_name "${RUN_NAME}" \
   --model_name_or_path "${MODEL_NAME}" \
