@@ -2,11 +2,11 @@
 set -euo pipefail
 
 MODEL_NAME="${MODEL_NAME:-Qwen/Qwen3-1.7B}"
-EVAL_DATASET="${EVAL_DATASET:-./data/context_target_v1_eval_messages.jsonl}"
+EVAL_DATASET="${EVAL_DATASET:-data/context_target_v1_eval_messages.jsonl}"
 EVAL_SPLIT="${EVAL_SPLIT:-train}"
 MESSAGES_FIELD="${MESSAGES_FIELD:-messages}"
 OUTPUT_DIR="${OUTPUT_DIR:-./outputs/eval_qwen3_messages}"
-CKPT_DIR="${CKPT_DIR:-}"
+CKPT_DIR="${CKPT_DIR:-./outputs/checkpoints/train_test}"
 
 if [[ -z "${CKPT_DIR}" ]]; then
   echo "Set CKPT_DIR to your checkpoint directory before running." >&2
