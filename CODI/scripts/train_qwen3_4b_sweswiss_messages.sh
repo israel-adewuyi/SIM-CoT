@@ -1,11 +1,23 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SAVE_DIR="${SAVE_DIR:-./outputs}"
+EXP_ID="${EXP_ID:-}"
+if [[ -z "${EXP_ID}" ]]; then
+  echo "Set EXP_ID (lowercase: [a-z0-9._-]) to identify this experiment." >&2
+  exit 1
+fi
+if [[ ! "${EXP_ID}" =~ ^[a-z0-9._-]+$ ]]; then
+  echo "Invalid EXP_ID='${EXP_ID}'. Use lowercase [a-z0-9._-] only." >&2
+  exit 1
+fi
+
+SAVE_DIR="${SAVE_DIR:-./outputs/experiments/${EXP_ID}}"
 MODEL_NAME="${MODEL_NAME:-Qwen/Qwen3-1.7B}"
 HF_DATASET="${HF_DATASET:-data/context_target_v1_train_messages.jsonl}"
-RUN_NAME="${RUN_NAME:-train_test}"
-TB_LOG_DIR="${TB_LOG_DIR:-${SAVE_DIR}/tb/${RUN_NAME}}"
+RUN_NAME="${RUN_NAME:-${EXP_ID}}"
+TRAIN_DIR="${TRAIN_DIR:-${SAVE_DIR}/train}"
+TRAIN_CKPT_DIR="${TRAIN_CKPT_DIR:-${TRAIN_DIR}/checkpoints}"
+TB_LOG_DIR="${TB_LOG_DIR:-${TRAIN_DIR}/tb/${RUN_NAME}}"
 HF_SPLIT="${HF_SPLIT:-train}"
 DECODER_PATH="${DECODER_PATH:-Qwen/Qwen3-0.6B}"
 MODEL_MAX_LENGTH="${MODEL_MAX_LENGTH:-1024}"
@@ -18,7 +30,7 @@ GRADIENT_CHECKPOINTING="${GRADIENT_CHECKPOINTING:-True}"
 export CODI_REQUIRE_CUDA="${CODI_REQUIRE_CUDA:-1}"
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 
-mkdir -p "${SAVE_DIR}" "${SAVE_DIR}/checkpoints/${RUN_NAME}" "${SAVE_DIR}/tb/${RUN_NAME}"
+mkdir -p "${SAVE_DIR}" "${TRAIN_DIR}" "${TRAIN_CKPT_DIR}" "${TB_LOG_DIR}"
 export TENSORBOARD_LOGGING_DIR="${TB_LOG_DIR}"
 
 EXTRA_ARGS=()
@@ -53,7 +65,7 @@ else
 fi
 
 "${LAUNCHER[@]}" \
-  --output_dir "${SAVE_DIR}/checkpoints/${RUN_NAME}" \
+  --output_dir "${TRAIN_CKPT_DIR}" \
   --expt_name "${RUN_NAME}" \
   --logging_steps 10 \
   --run_name "${RUN_NAME}" \

@@ -1,18 +1,35 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+EXP_ID="${EXP_ID:-}"
+if [[ -z "${EXP_ID}" ]]; then
+  echo "Set EXP_ID (lowercase: [a-z0-9._-]) to identify this experiment." >&2
+  exit 1
+fi
+if [[ ! "${EXP_ID}" =~ ^[a-z0-9._-]+$ ]]; then
+  echo "Invalid EXP_ID='${EXP_ID}'. Use lowercase [a-z0-9._-] only." >&2
+  exit 1
+fi
+
 MODEL_NAME="${MODEL_NAME:-Qwen/Qwen3-1.7B}"
 EVAL_DATASET="${EVAL_DATASET:-data/context_target_v1_eval_messages.jsonl}"
 EVAL_SPLIT="${EVAL_SPLIT:-train}"
 MESSAGES_FIELD="${MESSAGES_FIELD:-messages}"
-OUTPUT_DIR="${OUTPUT_DIR:-./outputs/eval_qwen3_messages}"
-CKPT_DIR="${CKPT_DIR:-./outputs/checkpoints/train_test}"
+EVAL_TAG="${EVAL_TAG:-$(date +%Y%m%d_%H%M%S)}"
+if [[ ! "${EVAL_TAG}" =~ ^[A-Za-z0-9._-]+$ ]]; then
+  echo "Invalid EVAL_TAG='${EVAL_TAG}'. Use [A-Za-z0-9._-] only." >&2
+  exit 1
+fi
+OUTPUT_DIR="${OUTPUT_DIR:-./outputs/experiments/${EXP_ID}/eval_a/${EVAL_TAG}}"
+CKPT_DIR="${CKPT_DIR:-./outputs/experiments/${EXP_ID}/train/checkpoints}"
 MAX_TOKEN_NUM="${MAX_TOKEN_NUM:-2048}"
 
 if [[ -z "${CKPT_DIR}" ]]; then
   echo "Set CKPT_DIR to your checkpoint directory before running." >&2
   exit 1
 fi
+
+mkdir -p "${OUTPUT_DIR}"
 
 uv run python test.py \
   --data_name messages \

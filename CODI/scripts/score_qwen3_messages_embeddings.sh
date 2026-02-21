@@ -1,14 +1,25 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-GENERATIONS="${GENERATIONS:-./outputs/eval_qwen3_messages/messages_generations.jsonl}"
+EXP_ID="${EXP_ID:-}"
+if [[ -z "${EXP_ID}" ]]; then
+  echo "Set EXP_ID (lowercase: [a-z0-9._-]) to identify this experiment." >&2
+  exit 1
+fi
+if [[ ! "${EXP_ID}" =~ ^[a-z0-9._-]+$ ]]; then
+  echo "Invalid EXP_ID='${EXP_ID}'. Use lowercase [a-z0-9._-] only." >&2
+  exit 1
+fi
+
+EVAL_TAG="${EVAL_TAG:-$(date +%Y%m%d_%H%M%S)}"
+GENERATIONS="${GENERATIONS:-}"
 EVAL_DATASET="${EVAL_DATASET:-data/context_target_v1_eval_messages.jsonl}"
 EVAL_SPLIT="${EVAL_SPLIT:-train}"
 MESSAGES_FIELD="${MESSAGES_FIELD:-messages}"
-OUTPUT_DIR="${OUTPUT_DIR:-./outputs/eval_qwen3_messages/embedding_scores}"
 
 SCORING_MODEL_ID="${SCORING_MODEL_ID:-sentence-transformers/all-mpnet-base-v2}"
 SCORING_MODEL_REVISION="${SCORING_MODEL_REVISION:-}"
+SCORER_TAG="${SCORER_TAG:-}"
 SCORING_POOLING="${SCORING_POOLING:-mean}"
 SCORING_NORMALIZE="${SCORING_NORMALIZE:-true}"
 SCORING_MAX_LENGTH="${SCORING_MAX_LENGTH:-512}"
@@ -20,12 +31,36 @@ THRESHOLD="${THRESHOLD:-}"
 DEDUPE_POLICY="${DEDUPE_POLICY:-last}"
 SCORING_VERSION="${SCORING_VERSION:-embedding_harness_v1}"
 LOG_LEVEL="${LOG_LEVEL:-INFO}"
+OUTPUT_DIR="${OUTPUT_DIR:-}"
+
+if [[ -z "${SCORER_TAG}" ]]; then
+  SCORER_TAG="${SCORING_MODEL_ID//\//__}"
+  if [[ -n "${SCORING_MODEL_REVISION}" ]]; then
+    SCORER_TAG="${SCORER_TAG}__rev_${SCORING_MODEL_REVISION}"
+  fi
+fi
+SCORER_TAG="$(printf '%s' "${SCORER_TAG}" | tr -cs '[:alnum:]._-' '_')"
+
+if [[ -z "${GENERATIONS}" ]]; then
+  GENERATIONS="./outputs/experiments/${EXP_ID}/eval_a/${EVAL_TAG}/messages_generations.jsonl"
+fi
+
+if [[ ! "${EVAL_TAG}" =~ ^[A-Za-z0-9._-]+$ ]]; then
+  echo "Invalid EVAL_TAG='${EVAL_TAG}'. Use [A-Za-z0-9._-] only." >&2
+  exit 1
+fi
+
+if [[ -z "${OUTPUT_DIR}" ]]; then
+  OUTPUT_DIR="./outputs/experiments/${EXP_ID}/eval_b/${EVAL_TAG}/${SCORER_TAG}"
+fi
 
 read -r -a generation_paths <<< "${GENERATIONS}"
 if [[ "${#generation_paths[@]}" -eq 0 ]]; then
   echo "GENERATIONS is empty. Provide at least one generation JSONL path." >&2
   exit 1
 fi
+
+mkdir -p "${OUTPUT_DIR}"
 
 cmd=(
   uv run python eval_harness/score_generations_with_embeddings.py

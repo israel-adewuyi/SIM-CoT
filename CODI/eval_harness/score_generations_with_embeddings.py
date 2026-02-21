@@ -25,6 +25,15 @@ DTYPE_MAP = {
 }
 
 
+def _normalise_length_limit(value: Any) -> Optional[int]:
+    if not isinstance(value, int):
+        return None
+    # HF commonly uses huge sentinel values when "effectively unbounded".
+    if value <= 0 or value >= 1_000_000:
+        return None
+    return value
+
+
 def _parse_bool(value: str) -> bool:
     value = value.strip().lower()
     if value in {"1", "true", "yes", "y", "on"}:
@@ -330,6 +339,44 @@ def _resolve_dtype(dtype_arg: str, device: torch.device) -> torch.dtype:
     return dtype
 
 
+def _resolve_effective_max_length(requested_max_length: int, tokenizer, model) -> int:
+    limits: List[Tuple[str, int]] = []
+
+    tokenizer_limit = _normalise_length_limit(getattr(tokenizer, "model_max_length", None))
+    if tokenizer_limit is not None:
+        limits.append(("tokenizer.model_max_length", tokenizer_limit))
+
+    config = getattr(model, "config", None)
+    if config is not None:
+        for key in ("max_position_embeddings", "n_positions", "max_seq_len", "max_sequence_length"):
+            value = _normalise_length_limit(getattr(config, key, None))
+            if value is not None:
+                limits.append((f"config.{key}", value))
+
+    effective = requested_max_length
+    if limits:
+        cap = min(v for _, v in limits)
+        effective = min(requested_max_length, cap)
+        logging.info(
+            "Detected length caps: %s",
+            ", ".join(f"{k}={v}" for k, v in limits),
+        )
+
+    if effective <= 0:
+        raise ValueError(
+            f"Invalid effective max length ({effective}); requested_max_length={requested_max_length}."
+        )
+
+    if effective < requested_max_length:
+        logging.warning(
+            "Requested scoring_max_length=%s exceeds model/tokenizer capacity; "
+            "using effective_max_length=%s.",
+            requested_max_length,
+            effective,
+        )
+    return effective
+
+
 def _encode_texts(
     texts: List[str],
     tokenizer,
@@ -471,6 +518,7 @@ def main() -> int:
     )
 
     scored_at = datetime.now(timezone.utc).isoformat()
+    effective_max_length = args.scoring_max_length
 
     rows_for_output: List[Dict[str, Any]] = []
     refs_for_scoring: List[str] = []
@@ -509,7 +557,8 @@ def main() -> int:
             "scoring_model_revision": args.scoring_model_revision if args.scoring_model_revision else None,
             "scoring_pooling": args.scoring_pooling,
             "scoring_normalize": args.scoring_normalize,
-            "scoring_max_length": args.scoring_max_length,
+            "scoring_max_length": effective_max_length,
+            "scoring_max_length_requested": args.scoring_max_length,
             "scoring_dtype": args.scoring_dtype,
             "scoring_device": args.scoring_device,
             "similarity_metric": args.similarity_metric,
@@ -549,6 +598,13 @@ def main() -> int:
         if dtype != torch.float32:
             model = model.to(dtype=dtype)
         model.eval()
+        effective_max_length = _resolve_effective_max_length(
+            requested_max_length=args.scoring_max_length,
+            tokenizer=tokenizer,
+            model=model,
+        )
+        for row in rows_for_output:
+            row["scoring_max_length"] = effective_max_length
 
         logging.info("Encoding references (%s rows)", len(refs_for_scoring))
         ref_embs = _encode_texts(
@@ -557,7 +613,7 @@ def main() -> int:
             model=model,
             device=device,
             dtype=dtype,
-            max_length=args.scoring_max_length,
+            max_length=effective_max_length,
             batch_size=args.batch_size,
             pooling=args.scoring_pooling,
             normalize=args.scoring_normalize,
@@ -570,7 +626,7 @@ def main() -> int:
             model=model,
             device=device,
             dtype=dtype,
-            max_length=args.scoring_max_length,
+            max_length=effective_max_length,
             batch_size=args.batch_size,
             pooling=args.scoring_pooling,
             normalize=args.scoring_normalize,
@@ -634,7 +690,8 @@ def main() -> int:
         "scoring_model_revision": args.scoring_model_revision if args.scoring_model_revision else None,
         "scoring_pooling": args.scoring_pooling,
         "scoring_normalize": args.scoring_normalize,
-        "scoring_max_length": args.scoring_max_length,
+        "scoring_max_length": effective_max_length,
+        "scoring_max_length_requested": args.scoring_max_length,
         "scoring_dtype": args.scoring_dtype,
         "scoring_device": args.scoring_device,
     }
