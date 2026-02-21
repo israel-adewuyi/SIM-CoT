@@ -7,6 +7,7 @@ EVAL_SPLIT="${EVAL_SPLIT:-train}"
 MESSAGES_FIELD="${MESSAGES_FIELD:-messages}"
 OUTPUT_DIR="${OUTPUT_DIR:-./outputs/eval_qwen3_messages}"
 CKPT_DIR="${CKPT_DIR:-./outputs/checkpoints/train_test}"
+MAX_TOKEN_NUM="${MAX_TOKEN_NUM:-2048}"
 
 if [[ -z "${CKPT_DIR}" ]]; then
   echo "Set CKPT_DIR to your checkpoint directory before running." >&2
@@ -22,6 +23,7 @@ uv run python test.py \
   --messages_field "${MESSAGES_FIELD}" \
   --seed 11 \
   --model_max_length 1024 \
+  --max_token_num "${MAX_TOKEN_NUM}" \
   --bf16 \
   --lora_r 1 --lora_alpha 16 --lora_init \
   --batch_size 64 \
