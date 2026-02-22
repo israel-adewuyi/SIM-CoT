@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-EXP_ID="${EXP_ID:-}"
+EXP_ID="${EXP_ID:-model_qwen4B_max_len_2048}"
 if [[ -z "${EXP_ID}" ]]; then
-  echo "Set EXP_ID (lowercase: [a-z0-9._-]) to identify this experiment." >&2
+  echo "Set EXP_ID (lowercase: [A-Za-z0-9._-]) to identify this experiment." >&2
   exit 1
 fi
-if [[ ! "${EXP_ID}" =~ ^[a-z0-9._-]+$ ]]; then
-  echo "Invalid EXP_ID='${EXP_ID}'. Use lowercase [a-z0-9._-] only." >&2
+if [[ ! "${EXP_ID}" =~ ^[A-Za-z0-9._-]+$ ]]; then
+  echo "Invalid EXP_ID='${EXP_ID}'. Use lowercase [A-Za-z0-9._-] only." >&2
   exit 1
 fi
 
 SAVE_DIR="${SAVE_DIR:-./outputs/experiments/${EXP_ID}}"
-MODEL_NAME="${MODEL_NAME:-Qwen/Qwen3-1.7B}"
+MODEL_NAME="${MODEL_NAME:-Qwen/Qwen3-4B}"
 HF_DATASET="${HF_DATASET:-data/context_target_v1_train_messages.jsonl}"
 RUN_NAME="${RUN_NAME:-${EXP_ID}}"
 TRAIN_DIR="${TRAIN_DIR:-${SAVE_DIR}/train}"
@@ -20,8 +20,8 @@ TRAIN_CKPT_DIR="${TRAIN_CKPT_DIR:-${TRAIN_DIR}/checkpoints}"
 TB_LOG_DIR="${TB_LOG_DIR:-${TRAIN_DIR}/tb/${RUN_NAME}}"
 HF_SPLIT="${HF_SPLIT:-train}"
 DECODER_PATH="${DECODER_PATH:-Qwen/Qwen3-0.6B}"
-MODEL_MAX_LENGTH="${MODEL_MAX_LENGTH:-1024}"
-MAX_TOKEN_NUM="${MAX_TOKEN_NUM:-1024}"
+MODEL_MAX_LENGTH="${MODEL_MAX_LENGTH:-2048}"
+MAX_TOKEN_NUM="${MAX_TOKEN_NUM:-2048}"
 NUM_LATENT="${NUM_LATENT:-4}"
 PER_DEVICE_TRAIN_BATCH_SIZE="${PER_DEVICE_TRAIN_BATCH_SIZE:-1}"
 GRADIENT_ACCUMULATION_STEPS="${GRADIENT_ACCUMULATION_STEPS:-16}"
