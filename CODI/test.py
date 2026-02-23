@@ -450,6 +450,7 @@ def evaluation(model_args, data_args, training_args):
         with torch.no_grad():
             # encode the question
             past_key_values = None
+            decode_attention_mask = batch["attention_mask"]
             outputs = model.codi(input_ids=batch["input_ids"], use_cache=True, output_hidden_states=True, past_key_values=past_key_values, attention_mask=batch["attention_mask"])
             past_key_values = outputs.past_key_values
             latent_embd = outputs.hidden_states[-1][:, -1, :].unsqueeze(1)
@@ -470,7 +471,19 @@ def evaluation(model_args, data_args, training_args):
             inf_latent_iterations = training_args.inf_latent_iterations
             for i in range(inf_latent_iterations):
                 # decode the latent embeddings
-                outputs = model.codi(inputs_embeds=latent_embd, use_cache=True, output_hidden_states=True, past_key_values=past_key_values)
+                latent_step_mask = torch.ones(
+                    (batch_size, latent_embd.size(1)),
+                    dtype=decode_attention_mask.dtype,
+                    device=decode_attention_mask.device,
+                )
+                decode_attention_mask = torch.cat((decode_attention_mask, latent_step_mask), dim=1)
+                outputs = model.codi(
+                    inputs_embeds=latent_embd,
+                    use_cache=True,
+                    output_hidden_states=True,
+                    past_key_values=past_key_values,
+                    attention_mask=decode_attention_mask,
+                )
                 past_key_values = outputs.past_key_values
                 latent_embd = outputs.hidden_states[-1][:, -1, :].unsqueeze(1)
                 
@@ -503,10 +516,16 @@ def evaluation(model_args, data_args, training_args):
             pred_tokens = [[] for _ in range(batch_size)]
             for i in range(gen_kwargs["max_new_tokens"]):
                 seq_len += 1
+                gen_step_mask = torch.ones(
+                    (batch_size, output.size(1)),
+                    dtype=decode_attention_mask.dtype,
+                    device=decode_attention_mask.device,
+                )
+                decode_attention_mask = torch.cat((decode_attention_mask, gen_step_mask), dim=1)
                 out = model.codi(
                         inputs_embeds=output,
                         output_hidden_states=False,
-                        attention_mask=None,
+                        attention_mask=decode_attention_mask,
                         use_cache=True,
                         output_attentions=False,
                         past_key_values=past_key_values
