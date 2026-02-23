@@ -23,6 +23,7 @@ fi
 OUTPUT_DIR="${OUTPUT_DIR:-./outputs/eval/${EXP_ID}}"
 CKPT_DIR="${CKPT_DIR:-./outputs/experiments/${EXP_ID}/train/checkpoints}"
 MAX_TOKEN_NUM="${MAX_TOKEN_NUM:-4096}"
+EVAL_MAX_NEW_TOKENS="${EVAL_MAX_NEW_TOKENS:-256}"
 
 if [[ -z "${CKPT_DIR}" ]]; then
   echo "Set CKPT_DIR to your checkpoint directory before running." >&2
@@ -41,6 +42,7 @@ uv run python test.py \
   --seed 11 \
   --model_max_length 4096 \
   --max_token_num "${MAX_TOKEN_NUM}" \
+  --eval_max_new_tokens "${EVAL_MAX_NEW_TOKENS}" \
   --bf16 \
   --lora_r 2 --lora_alpha 16 --lora_init \
   --batch_size 8 \
