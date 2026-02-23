@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-EXP_ID="${EXP_ID:-model_qwen4B_max_len_4096-lora_r_2}"
+EXP_ID="${EXP_ID:-model_qwen4B_max_len_8192-lora_r_16}"
 if [[ -z "${EXP_ID}" ]]; then
   echo "Set EXP_ID (lowercase: [A-Za-z0-9._-]) to identify this experiment." >&2
   exit 1
@@ -20,9 +20,9 @@ if [[ ! "${EVAL_TAG}" =~ ^[A-Za-z0-9._-]+$ ]]; then
   echo "Invalid EVAL_TAG='${EVAL_TAG}'. Use [A-Za-z0-9._-] only." >&2
   exit 1
 fi
-OUTPUT_DIR="${OUTPUT_DIR:-./outputs/eval/${EXP_ID}}"
+OUTPUT_DIR="${OUTPUT_DIR:-./outputs/eval/${EXP_ID}_32K}"
 CKPT_DIR="${CKPT_DIR:-./outputs/experiments/${EXP_ID}/train/checkpoints}"
-MAX_TOKEN_NUM="${MAX_TOKEN_NUM:-4096}"
+MAX_TOKEN_NUM="${MAX_TOKEN_NUM:-32768}"
 
 if [[ -z "${CKPT_DIR}" ]]; then
   echo "Set CKPT_DIR to your checkpoint directory before running." >&2
@@ -39,11 +39,11 @@ uv run python test.py \
   --hf_dataset_split "${EVAL_SPLIT}" \
   --messages_field "${MESSAGES_FIELD}" \
   --seed 11 \
-  --model_max_length 4096 \
+  --model_max_length 32768 \
   --max_token_num "${MAX_TOKEN_NUM}" \
   --bf16 \
-  --lora_r 2 --lora_alpha 16 --lora_init \
-  --batch_size 8 \
+  --lora_r 16 --lora_alpha 16 --lora_init \
+  --batch_size 1 \
   --greedy True \
   --num_latent 4 \
   --use_prj True \
@@ -52,6 +52,6 @@ uv run python test.py \
   --prj_dropout 0.0 \
   --inf_latent_iterations 4 \
   --inf_num_iterations 1 \
-  --remove_eos False \
+  --remove_eos True \
   --use_lora True \
   --ckpt_dir "${CKPT_DIR}"
