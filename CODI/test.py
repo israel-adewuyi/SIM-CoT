@@ -420,8 +420,10 @@ def evaluation(model_args, data_args, training_args):
         question_data.append(batch.to(device))
 
     model.eval()
+    if training_args.eval_max_new_tokens <= 0:
+        raise ValueError("`--eval_max_new_tokens` must be > 0.")
     gen_kwargs = {
-        "max_new_tokens": 256,
+        "max_new_tokens": int(training_args.eval_max_new_tokens),
         "temperature":0.1,
         "top_k": 40,
         "top_p": 0.95,
@@ -575,11 +577,19 @@ def evaluation(model_args, data_args, training_args):
                     print("")
                 if is_messages_mode:
                     sample_idx = step * data_args.batch_size + mini_step
+                    prompt_tokens_with_padding = int(batch["input_ids"][mini_step].numel())
+                    prompt_tokens = int(batch["attention_mask"][mini_step].sum().item())
+                    prompt_padding_tokens = max(0, prompt_tokens_with_padding - prompt_tokens)
+                    generation_tokens = int(len(pred_token))
                     generation_record = {
                         "sample_idx": sample_idx,
                         "prompt": question[sample_idx],
                         "generated_text": decoded_pred,
                         "generated_token_ids": pred_token,
+                        "prompt_tokens": prompt_tokens,
+                        "prompt_tokens_with_padding": prompt_tokens_with_padding,
+                        "prompt_padding_tokens": prompt_padding_tokens,
+                        "generation_tokens": generation_tokens,
                     }
                     if sample_idx < len(generation_metadata):
                         generation_record.update(generation_metadata[sample_idx])
