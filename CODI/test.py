@@ -177,7 +177,7 @@ def _messages_to_prompt(messages: List[Dict[str, Any]], tokenizer) -> str:
         return tokenizer.apply_chat_template(
             [{"role": m["role"], "content": m["content"]} for m in prompt_messages],
             tokenize=False,
-            add_generation_prompt=True,
+            add_generation_prompt=False,
         )
 
     lines = []
@@ -195,6 +195,7 @@ def _filter_examples_by_token_length(
     max_token_num: int,
     answer: Optional[List[Any]] = None,
     generation_metadata: Optional[List[Dict[str, Any]]] = None,
+    add_special_tokens: bool = True,
 ):
     filtered_question = []
     filtered_answer = [] if answer is not None else None
@@ -202,7 +203,7 @@ def _filter_examples_by_token_length(
     dropped = 0
 
     for idx, q in enumerate(question):
-        q_len = len(tokenizer.encode(q, add_special_tokens=True))
+        q_len = len(tokenizer.encode(q, add_special_tokens=add_special_tokens))
         if q_len <= max_token_num:
             filtered_question.append(q)
             if filtered_answer is not None:
@@ -266,7 +267,6 @@ def evaluation(model_args, data_args, training_args):
         tokenizer.pad_token_id = model.pad_token_id
         if tokenizer.pad_token_id is None: # error handling
             tokenizer.pad_token_id = tokenizer.convert_tokens_to_ids('[PAD]')
-
     device = "cuda"
     model = model.to('cuda')
     model.to(torch.bfloat16)
@@ -276,6 +276,10 @@ def evaluation(model_args, data_args, training_args):
     ######################
     logging.warning("Downloading Data")
     is_messages_mode = "messages" in (data_args.data_name or "").lower()
+    use_chat_template = hasattr(tokenizer, "apply_chat_template") and bool(
+        getattr(tokenizer, "chat_template", None)
+    )
+    add_special_tokens_for_eval_prompt = not (is_messages_mode and use_chat_template)
     question_name = "question"
     answer_name = "answer"
     if is_messages_mode:
@@ -374,6 +378,7 @@ def evaluation(model_args, data_args, training_args):
             max_token_num=training_args.max_token_num,
             answer=answer if not is_messages_mode else None,
             generation_metadata=generation_metadata if is_messages_mode else None,
+            add_special_tokens=add_special_tokens_for_eval_prompt,
         )
         if not is_messages_mode:
             answer = filtered_answer if filtered_answer is not None else []
@@ -402,12 +407,14 @@ def evaluation(model_args, data_args, training_args):
                 question[i*data_args.batch_size: (i+1)*data_args.batch_size],
                 return_tensors="pt",
                 padding="longest",
+                add_special_tokens=add_special_tokens_for_eval_prompt,
             )
         else:
             batch = tokenizer(
                 question[i*data_args.batch_size:],
                 return_tensors="pt",
                 padding="longest",
+                add_special_tokens=add_special_tokens_for_eval_prompt,
             )
         
         if training_args.remove_eos:
