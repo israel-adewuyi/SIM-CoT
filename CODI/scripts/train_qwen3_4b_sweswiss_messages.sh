@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-EXP_ID="${EXP_ID:-model_qwen4B_max_len_2048}"
+EXP_ID="${EXP_ID:-model_qwen4B_max_len_16384-lora_r_16}"
 if [[ -z "${EXP_ID}" ]]; then
   echo "Set EXP_ID (lowercase: [A-Za-z0-9._-]) to identify this experiment." >&2
   exit 1
@@ -20,8 +20,8 @@ TRAIN_CKPT_DIR="${TRAIN_CKPT_DIR:-${TRAIN_DIR}/checkpoints}"
 TB_LOG_DIR="${TB_LOG_DIR:-${TRAIN_DIR}/tb/${RUN_NAME}}"
 HF_SPLIT="${HF_SPLIT:-train}"
 DECODER_PATH="${DECODER_PATH:-Qwen/Qwen3-0.6B}"
-MODEL_MAX_LENGTH="${MODEL_MAX_LENGTH:-2048}"
-MAX_TOKEN_NUM="${MAX_TOKEN_NUM:-2048}"
+MODEL_MAX_LENGTH="${MODEL_MAX_LENGTH:-16384}"
+MAX_TOKEN_NUM="${MAX_TOKEN_NUM:-16384}"
 NUM_LATENT="${NUM_LATENT:-4}"
 PER_DEVICE_TRAIN_BATCH_SIZE="${PER_DEVICE_TRAIN_BATCH_SIZE:-1}"
 GRADIENT_ACCUMULATION_STEPS="${GRADIENT_ACCUMULATION_STEPS:-16}"
@@ -84,7 +84,7 @@ fi
   --learning_rate 2e-4 \
   --max_grad_norm 1.0 \
   --use_lora True \
-  --lora_r 1 --lora_alpha 16 --lora_init \
+  --lora_r 16 --lora_alpha 16 --lora_init \
   --save_strategy "epoch" \
   --save_total_limit 2 \
   --weight_decay 0.01 \

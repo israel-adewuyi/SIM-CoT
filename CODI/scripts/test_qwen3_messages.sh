@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-EXP_ID="${EXP_ID:-}"
+EXP_ID="${EXP_ID:-model_qwen4B_max_len_4096-lora_r_2}"
 if [[ -z "${EXP_ID}" ]]; then
-  echo "Set EXP_ID (lowercase: [a-z0-9._-]) to identify this experiment." >&2
+  echo "Set EXP_ID (lowercase: [A-Za-z0-9._-]) to identify this experiment." >&2
   exit 1
 fi
-if [[ ! "${EXP_ID}" =~ ^[a-z0-9._-]+$ ]]; then
-  echo "Invalid EXP_ID='${EXP_ID}'. Use lowercase [a-z0-9._-] only." >&2
+if [[ ! "${EXP_ID}" =~ ^[A-Za-z0-9._-]+$ ]]; then
+  echo "Invalid EXP_ID='${EXP_ID}'. Use lowercase [A-Za-z0-9._-] only." >&2
   exit 1
 fi
 
-MODEL_NAME="${MODEL_NAME:-Qwen/Qwen3-1.7B}"
+MODEL_NAME="${MODEL_NAME:-Qwen/Qwen3-4B}"
 EVAL_DATASET="${EVAL_DATASET:-data/context_target_v1_eval_messages.jsonl}"
 EVAL_SPLIT="${EVAL_SPLIT:-train}"
 MESSAGES_FIELD="${MESSAGES_FIELD:-messages}"
@@ -20,9 +20,9 @@ if [[ ! "${EVAL_TAG}" =~ ^[A-Za-z0-9._-]+$ ]]; then
   echo "Invalid EVAL_TAG='${EVAL_TAG}'. Use [A-Za-z0-9._-] only." >&2
   exit 1
 fi
-OUTPUT_DIR="${OUTPUT_DIR:-./outputs/experiments/${EXP_ID}/eval_a/${EVAL_TAG}}"
+OUTPUT_DIR="${OUTPUT_DIR:-./outputs/eval/${EXP_ID}}"
 CKPT_DIR="${CKPT_DIR:-./outputs/experiments/${EXP_ID}/train/checkpoints}"
-MAX_TOKEN_NUM="${MAX_TOKEN_NUM:-2048}"
+MAX_TOKEN_NUM="${MAX_TOKEN_NUM:-4096}"
 
 if [[ -z "${CKPT_DIR}" ]]; then
   echo "Set CKPT_DIR to your checkpoint directory before running." >&2
@@ -39,11 +39,11 @@ uv run python test.py \
   --hf_dataset_split "${EVAL_SPLIT}" \
   --messages_field "${MESSAGES_FIELD}" \
   --seed 11 \
-  --model_max_length 1024 \
+  --model_max_length 4096 \
   --max_token_num "${MAX_TOKEN_NUM}" \
   --bf16 \
-  --lora_r 1 --lora_alpha 16 --lora_init \
-  --batch_size 64 \
+  --lora_r 2 --lora_alpha 16 --lora_init \
+  --batch_size 8 \
   --greedy True \
   --num_latent 4 \
   --use_prj True \
