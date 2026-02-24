@@ -659,6 +659,229 @@ def train():
             explain_steps_ids=explain_steps_ids,
         )
 
+    def _decode_ids_with_markers(
+        ids: Sequence[int],
+        tokenizer: transformers.PreTrainedTokenizer,
+        bot_id: int,
+        eot_id: int,
+        pad_id: Optional[int],
+    ) -> str:
+        marker_map = {
+            IGNORE_INDEX: "<IGNORE>",
+            bot_id: "<BOT>",
+            eot_id: "<EOT>",
+        }
+        if pad_id is not None:
+            marker_map[pad_id] = "<PAD>"
+
+        decoded_parts: List[str] = []
+        buffered_ids: List[int] = []
+
+        def _flush_buffer():
+            if len(buffered_ids) == 0:
+                return
+            try:
+                text = tokenizer.decode(
+                    buffered_ids,
+                    skip_special_tokens=False,
+                    clean_up_tokenization_spaces=False,
+                )
+            except TypeError:
+                text = tokenizer.decode(buffered_ids, skip_special_tokens=False)
+            except Exception:
+                text = " ".join([f"<ID:{x}>" for x in buffered_ids])
+            decoded_parts.append(text)
+            buffered_ids.clear()
+
+        for raw_tid in ids:
+            try:
+                tid = int(raw_tid)
+            except Exception:
+                tid = raw_tid
+            if tid in marker_map:
+                _flush_buffer()
+                decoded_parts.append(f" {marker_map[tid]} ")
+            else:
+                buffered_ids.append(tid)
+        _flush_buffer()
+        return "".join(decoded_parts).strip()
+
+    def _decode_training_instance(
+        instance: Dict[str, Any],
+        tokenizer: transformers.PreTrainedTokenizer,
+        bot_id: int,
+        eot_id: int,
+        pad_id: Optional[int],
+    ) -> Dict[str, Any]:
+        token_fields = [
+            "encoder_input_ids",
+            "decoder_input_ids",
+            "ref_input_ids",
+            "labels",
+            "ref_labels",
+        ]
+        raw_ids: Dict[str, Any] = {}
+        decoded_text: Dict[str, Any] = {}
+        target_only_text: Dict[str, Any] = {}
+        lengths: Dict[str, Any] = {}
+
+        for field in token_fields:
+            value = instance.get(field, None)
+            if value is None:
+                continue
+            if isinstance(value, torch.Tensor):
+                ids = value.detach().cpu().tolist()
+            else:
+                ids = list(value)
+            ids = [int(x) for x in ids]
+
+            raw_ids[field] = ids
+            lengths[field] = len(ids)
+            decoded_text[field] = _decode_ids_with_markers(ids, tokenizer, bot_id, eot_id, pad_id)
+
+            filtered_ids = [x for x in ids if x != IGNORE_INDEX and x != pad_id]
+            target_only_text[field] = _decode_ids_with_markers(
+                filtered_ids, tokenizer, bot_id, eot_id, pad_id
+            )
+
+        raw_steps = instance.get("explain_steps_ids", [])
+        if isinstance(raw_steps, torch.Tensor):
+            raw_steps = raw_steps.detach().cpu().tolist()
+        normalised_steps: List[List[int]] = []
+        for step in raw_steps:
+            if isinstance(step, torch.Tensor):
+                step = step.detach().cpu().tolist()
+            step_ids = [int(x) for x in list(step)]
+            normalised_steps.append(step_ids)
+        raw_ids["explain_steps_ids"] = normalised_steps
+        lengths["explain_steps_ids"] = [len(step) for step in normalised_steps]
+        decoded_text["explain_steps_ids"] = [
+            _decode_ids_with_markers(step, tokenizer, bot_id, eot_id, pad_id)
+            for step in normalised_steps
+        ]
+        target_only_text["explain_steps_ids"] = [
+            _decode_ids_with_markers(
+                [x for x in step if x != IGNORE_INDEX and x != pad_id],
+                tokenizer,
+                bot_id,
+                eot_id,
+                pad_id,
+            )
+            for step in normalised_steps
+        ]
+
+        positions = {}
+        for key in ("ref_answer_position", "model_answer_position"):
+            if key in instance:
+                try:
+                    positions[key] = int(instance[key])
+                except Exception:
+                    positions[key] = instance[key]
+
+        return {
+            "raw_ids": raw_ids,
+            "decoded_text": decoded_text,
+            "target_only_text": target_only_text,
+            "lengths": lengths,
+            "positions": positions,
+        }
+
+    def _preview_messages_dataset(
+        train_dataset: Dataset,
+        tokenizer: transformers.PreTrainedTokenizer,
+        training_args: TrainingArguments,
+        bot_id: int,
+        eot_id: int,
+    ) -> None:
+        enabled = os.environ.get("CODI_DEBUG_DECODE", "0").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+        }
+        if not enabled:
+            return
+
+        local_rank = getattr(training_args, "local_rank", -1)
+        if local_rank not in (-1, 0):
+            return
+
+        sample_count_env = os.environ.get("CODI_DEBUG_DECODE_SAMPLES", "3").strip()
+        try:
+            requested_samples = int(sample_count_env)
+        except ValueError:
+            requested_samples = 3
+        requested_samples = max(1, requested_samples)
+
+        total_samples = len(train_dataset)
+        dump_samples = min(total_samples, requested_samples)
+        if dump_samples == 0:
+            print("[debug decode] enabled but dataset is empty; skipping preview.")
+            return
+
+        output_file = os.environ.get("CODI_DEBUG_DECODE_FILE", "").strip()
+        if output_file == "":
+            output_file = os.path.join(
+                training_args.output_dir, "debug_messages_dataset_decoded.jsonl"
+            )
+        output_path = Path(output_file).expanduser().resolve()
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        pad_id = tokenizer.pad_token_id
+        records = []
+
+        print(
+            "[debug decode] enabled: samples=%d/%d file=%s"
+            % (dump_samples, total_samples, str(output_path))
+        )
+
+        def _shorten(text: str, max_chars: int = 260) -> str:
+            text = text.replace("\n", "\\n")
+            if len(text) <= max_chars:
+                return text
+            return text[: max_chars - 3] + "..."
+
+        for idx in range(dump_samples):
+            decoded = _decode_training_instance(
+                train_dataset[idx], tokenizer, bot_id=bot_id, eot_id=eot_id, pad_id=pad_id
+            )
+            record = {
+                "sample_index": idx,
+                "dataset_size": total_samples,
+                **decoded,
+            }
+            records.append(record)
+
+            print(
+                f"[debug decode][sample {idx}] lengths={record['lengths']} "
+                f"positions={record['positions']}"
+            )
+            for field in (
+                "encoder_input_ids",
+                "decoder_input_ids",
+                "ref_input_ids",
+                "labels",
+                "ref_labels",
+            ):
+                if field in record["decoded_text"]:
+                    print(
+                        f"[debug decode][sample {idx}] {field}: "
+                        f"{_shorten(record['decoded_text'][field])}"
+                    )
+
+            if "explain_steps_ids" in record["decoded_text"]:
+                steps_preview = record["decoded_text"]["explain_steps_ids"][:2]
+                for step_idx, step_text in enumerate(steps_preview):
+                    print(
+                        f"[debug decode][sample {idx}] explain_steps_ids[{step_idx}]: "
+                        f"{_shorten(step_text)}"
+                    )
+
+        with output_path.open("w", encoding="utf-8") as fout:
+            for record in records:
+                fout.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+        print(f"[debug decode] wrote {len(records)} sample(s) to {output_path}")
+
     class SupervisedDataset(Dataset):
         QUESTION_PROMPT = "\nAnswer the above question. First think step by step and then answer the final number.\n"
         QUESTION_DA_PROMPT = "\nAnswer the above question. Answer the final number directly in one number.\n"
@@ -921,6 +1144,13 @@ def train():
                 bot=model.bot_id,
                 eot=model.eot_id,
                 messages_field=data_args.messages_field,
+            )
+            _preview_messages_dataset(
+                train_dataset=train_dataset,
+                tokenizer=tokenizer,
+                training_args=training_args,
+                bot_id=model.bot_id,
+                eot_id=model.eot_id,
             )
             data_collator = DataCollatorForSupervisedDataset(tokenizer=tokenizer)
             return dict(train_dataset=train_dataset, eval_dataset=None, data_collator=data_collator)
