@@ -4,6 +4,7 @@ import logging
 import os
 import re
 import ast
+from datetime import datetime
 from pathlib import Path
 from dataclasses import dataclass
 from typing import Dict, Optional, Sequence, List, Tuple, Any
@@ -220,18 +221,40 @@ def train():
     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
 
     output_dir_path = Path(training_args.output_dir).expanduser().resolve()
-    run_name = (getattr(training_args, "run_name", None) or "").strip()
-    if run_name and output_dir_path.parent.name == "checkpoints":
-        training_args.logging_dir = str(output_dir_path.parent.parent / "tb" / run_name)
 
-    if not training_args.logging_dir:
-        tb_logging_dir = os.environ.get("TENSORBOARD_LOGGING_DIR", "").strip()
-        if tb_logging_dir:
-            training_args.logging_dir = tb_logging_dir
+    report_to = getattr(training_args, "report_to", None)
+    if report_to is None:
+        report_to_list = []
+    elif isinstance(report_to, str):
+        report_to_list = [report_to]
+    else:
+        report_to_list = [str(x) for x in report_to]
+    report_to_normalized = {x.strip().lower() for x in report_to_list}
+    tensorboard_enabled = (
+        "all" in report_to_normalized
+        or "tensorboard" in report_to_normalized
+    )
 
-    if training_args.logging_dir:
-        training_args.logging_dir = str(Path(training_args.logging_dir).expanduser().resolve())
-        os.makedirs(training_args.logging_dir, exist_ok=True)
+    if tensorboard_enabled:
+        raw_run_name = (getattr(training_args, "run_name", None) or "").strip()
+        if not raw_run_name:
+            raise ValueError(
+                "`--run_name` is required when TensorBoard logging is enabled. "
+                "Example: --run_name my_experiment"
+            )
+
+        sanitized_run_name = re.sub(r"[^A-Za-z0-9._-]+", "_", raw_run_name).strip("._-")
+        if not sanitized_run_name:
+            raise ValueError(
+                "`--run_name` must contain at least one valid character from [A-Za-z0-9._-] "
+                "after sanitization. Example: --run_name my_experiment"
+            )
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        tb_root = Path("outputs/tb").resolve()
+        logging_dir = tb_root / f"{sanitized_run_name}__{timestamp}"
+        os.makedirs(logging_dir, exist_ok=True)
+        training_args.logging_dir = str(logging_dir)
         os.environ["TENSORBOARD_LOGGING_DIR"] = training_args.logging_dir
 
     training_args.output_dir = str(output_dir_path)

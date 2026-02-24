@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-EXP_ID="${EXP_ID:-}"
+EXP_ID="${EXP_ID:-model_qwen4B_max_len_4096-lora_r_2}"
 if [[ -z "${EXP_ID}" ]]; then
-  echo "Set EXP_ID (lowercase: [a-z0-9._-]) to identify this experiment." >&2
+  echo "Set EXP_ID (lowercase: [A-Za-z0-9._-]) to identify this experiment." >&2
   exit 1
 fi
-if [[ ! "${EXP_ID}" =~ ^[a-z0-9._-]+$ ]]; then
-  echo "Invalid EXP_ID='${EXP_ID}'. Use lowercase [a-z0-9._-] only." >&2
+if [[ ! "${EXP_ID}" =~ ^[A-Za-z0-9._-]+$ ]]; then
+  echo "Invalid EXP_ID='${EXP_ID}'. Use lowercase [A-Za-z0-9._-] only." >&2
   exit 1
 fi
 
@@ -17,15 +17,15 @@ EVAL_DATASET="${EVAL_DATASET:-data/context_target_v1_eval_messages.jsonl}"
 EVAL_SPLIT="${EVAL_SPLIT:-train}"
 MESSAGES_FIELD="${MESSAGES_FIELD:-messages}"
 
-SCORING_MODEL_ID="${SCORING_MODEL_ID:-sentence-transformers/all-mpnet-base-v2}"
+SCORING_MODEL_ID="${SCORING_MODEL_ID:-Qwen/Qwen3-Embedding-0.6B}"
 SCORING_MODEL_REVISION="${SCORING_MODEL_REVISION:-}"
-SCORER_TAG="${SCORER_TAG:-}"
+SCORER_TAG="${SCORER_TAG:-qwen3_emb_0.6B}"
 SCORING_POOLING="${SCORING_POOLING:-mean}"
 SCORING_NORMALIZE="${SCORING_NORMALIZE:-true}"
-SCORING_MAX_LENGTH="${SCORING_MAX_LENGTH:-512}"
+SCORING_MAX_LENGTH="${SCORING_MAX_LENGTH:-4096}"
 SCORING_DTYPE="${SCORING_DTYPE:-float16}"
 SCORING_DEVICE="${SCORING_DEVICE:-auto}"
-BATCH_SIZE="${BATCH_SIZE:-64}"
+BATCH_SIZE="${BATCH_SIZE:-4}"
 SIMILARITY_METRIC="${SIMILARITY_METRIC:-cosine}"
 THRESHOLD="${THRESHOLD:-}"
 DEDUPE_POLICY="${DEDUPE_POLICY:-last}"
@@ -42,7 +42,7 @@ fi
 SCORER_TAG="$(printf '%s' "${SCORER_TAG}" | tr -cs '[:alnum:]._-' '_')"
 
 if [[ -z "${GENERATIONS}" ]]; then
-  GENERATIONS="./outputs/experiments/${EXP_ID}/eval_a/${EVAL_TAG}/messages_generations.jsonl"
+  GENERATIONS="./outputs/eval/${EXP_ID}/messages_generations.jsonl"
 fi
 
 if [[ ! "${EVAL_TAG}" =~ ^[A-Za-z0-9._-]+$ ]]; then
@@ -51,7 +51,7 @@ if [[ ! "${EVAL_TAG}" =~ ^[A-Za-z0-9._-]+$ ]]; then
 fi
 
 if [[ -z "${OUTPUT_DIR}" ]]; then
-  OUTPUT_DIR="./outputs/experiments/${EXP_ID}/eval_b/${EVAL_TAG}/${SCORER_TAG}"
+  OUTPUT_DIR="./outputs/eval/${EXP_ID}/${SCORER_TAG}"
 fi
 
 read -r -a generation_paths <<< "${GENERATIONS}"

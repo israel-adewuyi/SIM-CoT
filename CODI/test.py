@@ -177,7 +177,7 @@ def _messages_to_prompt(messages: List[Dict[str, Any]], tokenizer) -> str:
         return tokenizer.apply_chat_template(
             [{"role": m["role"], "content": m["content"]} for m in prompt_messages],
             tokenize=False,
-            add_generation_prompt=True,
+            add_generation_prompt=False,
         )
 
     lines = []
@@ -195,6 +195,7 @@ def _filter_examples_by_token_length(
     max_token_num: int,
     answer: Optional[List[Any]] = None,
     generation_metadata: Optional[List[Dict[str, Any]]] = None,
+    add_special_tokens: bool = True,
 ):
     filtered_question = []
     filtered_answer = [] if answer is not None else None
@@ -202,7 +203,7 @@ def _filter_examples_by_token_length(
     dropped = 0
 
     for idx, q in enumerate(question):
-        q_len = len(tokenizer.encode(q, add_special_tokens=True))
+        q_len = len(tokenizer.encode(q, add_special_tokens=add_special_tokens))
         if q_len <= max_token_num:
             filtered_question.append(q)
             if filtered_answer is not None:
@@ -266,7 +267,6 @@ def evaluation(model_args, data_args, training_args):
         tokenizer.pad_token_id = model.pad_token_id
         if tokenizer.pad_token_id is None: # error handling
             tokenizer.pad_token_id = tokenizer.convert_tokens_to_ids('[PAD]')
-
     device = "cuda"
     model = model.to('cuda')
     model.to(torch.bfloat16)
@@ -276,6 +276,10 @@ def evaluation(model_args, data_args, training_args):
     ######################
     logging.warning("Downloading Data")
     is_messages_mode = "messages" in (data_args.data_name or "").lower()
+    use_chat_template = hasattr(tokenizer, "apply_chat_template") and bool(
+        getattr(tokenizer, "chat_template", None)
+    )
+    add_special_tokens_for_eval_prompt = not (is_messages_mode and use_chat_template)
     question_name = "question"
     answer_name = "answer"
     if is_messages_mode:
@@ -374,6 +378,7 @@ def evaluation(model_args, data_args, training_args):
             max_token_num=training_args.max_token_num,
             answer=answer if not is_messages_mode else None,
             generation_metadata=generation_metadata if is_messages_mode else None,
+            add_special_tokens=add_special_tokens_for_eval_prompt,
         )
         if not is_messages_mode:
             answer = filtered_answer if filtered_answer is not None else []
@@ -402,12 +407,14 @@ def evaluation(model_args, data_args, training_args):
                 question[i*data_args.batch_size: (i+1)*data_args.batch_size],
                 return_tensors="pt",
                 padding="longest",
+                add_special_tokens=add_special_tokens_for_eval_prompt,
             )
         else:
             batch = tokenizer(
                 question[i*data_args.batch_size:],
                 return_tensors="pt",
                 padding="longest",
+                add_special_tokens=add_special_tokens_for_eval_prompt,
             )
         
         if training_args.remove_eos:
@@ -420,8 +427,10 @@ def evaluation(model_args, data_args, training_args):
         question_data.append(batch.to(device))
 
     model.eval()
+    if training_args.eval_max_new_tokens <= 0:
+        raise ValueError("`--eval_max_new_tokens` must be > 0.")
     gen_kwargs = {
-        "max_new_tokens": 256,
+        "max_new_tokens": int(training_args.eval_max_new_tokens),
         "temperature":0.1,
         "top_k": 40,
         "top_p": 0.95,
@@ -448,6 +457,7 @@ def evaluation(model_args, data_args, training_args):
         with torch.no_grad():
             # encode the question
             past_key_values = None
+            decode_attention_mask = batch["attention_mask"]
             outputs = model.codi(input_ids=batch["input_ids"], use_cache=True, output_hidden_states=True, past_key_values=past_key_values, attention_mask=batch["attention_mask"])
             past_key_values = outputs.past_key_values
             latent_embd = outputs.hidden_states[-1][:, -1, :].unsqueeze(1)
@@ -468,7 +478,19 @@ def evaluation(model_args, data_args, training_args):
             inf_latent_iterations = training_args.inf_latent_iterations
             for i in range(inf_latent_iterations):
                 # decode the latent embeddings
-                outputs = model.codi(inputs_embeds=latent_embd, use_cache=True, output_hidden_states=True, past_key_values=past_key_values)
+                latent_step_mask = torch.ones(
+                    (batch_size, latent_embd.size(1)),
+                    dtype=decode_attention_mask.dtype,
+                    device=decode_attention_mask.device,
+                )
+                decode_attention_mask = torch.cat((decode_attention_mask, latent_step_mask), dim=1)
+                outputs = model.codi(
+                    inputs_embeds=latent_embd,
+                    use_cache=True,
+                    output_hidden_states=True,
+                    past_key_values=past_key_values,
+                    attention_mask=decode_attention_mask,
+                )
                 past_key_values = outputs.past_key_values
                 latent_embd = outputs.hidden_states[-1][:, -1, :].unsqueeze(1)
                 
@@ -501,10 +523,16 @@ def evaluation(model_args, data_args, training_args):
             pred_tokens = [[] for _ in range(batch_size)]
             for i in range(gen_kwargs["max_new_tokens"]):
                 seq_len += 1
+                gen_step_mask = torch.ones(
+                    (batch_size, output.size(1)),
+                    dtype=decode_attention_mask.dtype,
+                    device=decode_attention_mask.device,
+                )
+                decode_attention_mask = torch.cat((decode_attention_mask, gen_step_mask), dim=1)
                 out = model.codi(
                         inputs_embeds=output,
                         output_hidden_states=False,
-                        attention_mask=None,
+                        attention_mask=decode_attention_mask,
                         use_cache=True,
                         output_attentions=False,
                         past_key_values=past_key_values
@@ -514,7 +542,7 @@ def evaluation(model_args, data_args, training_args):
 
                 # implement the sampling process
                 if training_args.greedy:
-                    next_token_ids = torch.argmax(logits, dim=-1).squeeze(-1)
+                    next_token_ids = torch.argmax(logits, dim=-1)
                 else:
                     logits /= gen_kwargs["temperature"]
                     if gen_kwargs["top_k"] > 1:
@@ -536,6 +564,11 @@ def evaluation(model_args, data_args, training_args):
                     
                     probs = F.softmax(logits, dim=-1)
                     next_token_ids = torch.multinomial(probs, num_samples=1).squeeze(-1)
+
+                if next_token_ids.dim() == 0:
+                    next_token_ids = next_token_ids.unsqueeze(0)
+                elif next_token_ids.dim() > 1:
+                    next_token_ids = next_token_ids.reshape(-1)
 
                 # Handle EOS for each sequence
                 for b in range(batch_size):
@@ -570,11 +603,19 @@ def evaluation(model_args, data_args, training_args):
                     print("")
                 if is_messages_mode:
                     sample_idx = step * data_args.batch_size + mini_step
+                    prompt_tokens_with_padding = int(batch["input_ids"][mini_step].numel())
+                    prompt_tokens = int(batch["attention_mask"][mini_step].sum().item())
+                    prompt_padding_tokens = max(0, prompt_tokens_with_padding - prompt_tokens)
+                    generation_tokens = int(len(pred_token))
                     generation_record = {
                         "sample_idx": sample_idx,
                         "prompt": question[sample_idx],
                         "generated_text": decoded_pred,
                         "generated_token_ids": pred_token,
+                        "prompt_tokens": prompt_tokens,
+                        "prompt_tokens_with_padding": prompt_tokens_with_padding,
+                        "prompt_padding_tokens": prompt_padding_tokens,
+                        "generation_tokens": generation_tokens,
                     }
                     if sample_idx < len(generation_metadata):
                         generation_record.update(generation_metadata[sample_idx])
