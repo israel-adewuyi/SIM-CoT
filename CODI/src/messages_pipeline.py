@@ -165,6 +165,42 @@ def _template_payload(messages: Sequence[Dict[str, Any]]) -> List[Dict[str, str]
     return [{"role": str(msg["role"]), "content": str(msg["content"])} for msg in messages]
 
 
+def _coerce_token_id_list(token_output: Any) -> Optional[List[int]]:
+    if token_output is None:
+        return None
+
+    if isinstance(token_output, dict):
+        token_output = token_output.get("input_ids", None)
+        if token_output is None:
+            return None
+
+    if hasattr(token_output, "input_ids"):
+        token_output = getattr(token_output, "input_ids")
+
+    if hasattr(token_output, "tolist"):
+        token_output = token_output.tolist()
+
+    if isinstance(token_output, tuple):
+        token_output = list(token_output)
+
+    if not isinstance(token_output, list):
+        return None
+
+    # Handle batched [1, T] sequences.
+    if len(token_output) > 0 and isinstance(token_output[0], (list, tuple)):
+        if len(token_output) != 1:
+            return None
+        token_output = list(token_output[0])
+
+    token_ids: List[int] = []
+    for tok in token_output:
+        try:
+            token_ids.append(int(tok))
+        except Exception:
+            return None
+    return token_ids
+
+
 def build_tokens_from_messages(
     messages: Sequence[Dict[str, Any]],
     tokenizer: "transformers.PreTrainedTokenizer",
@@ -177,16 +213,15 @@ def build_tokens_from_messages(
         full_ids: List[int] = []
         full_labels: List[int] = []
         for idx, msg in enumerate(messages):
-            partial_ids = tokenizer.apply_chat_template(
+            partial_output = tokenizer.apply_chat_template(
                 _template_payload(messages[: idx + 1]),
                 tokenize=True,
                 add_generation_prompt=False,
             )
-            if not isinstance(partial_ids, list):
-                if hasattr(partial_ids, "tolist"):
-                    partial_ids = partial_ids.tolist()
-                else:
-                    partial_ids = list(partial_ids)
+            partial_ids = _coerce_token_id_list(partial_output)
+            if partial_ids is None:
+                use_chat_template = False
+                break
 
             if partial_ids[: len(full_ids)] != full_ids:
                 use_chat_template = False
@@ -209,7 +244,11 @@ def build_tokens_from_messages(
         content = str(msg["content"]).strip()
         prefix = "System" if role == "system" else ("User" if role == "user" else "Assistant")
         text = f"{prefix}: {content}\n"
-        msg_ids = tokenizer.encode(text, add_special_tokens=(idx == 0))
+        msg_ids = _coerce_token_id_list(
+            tokenizer.encode(text, add_special_tokens=(idx == 0))
+        )
+        if msg_ids is None:
+            return [], []
         full_ids.extend(msg_ids)
         if is_trainable_message(msg):
             full_labels.extend(msg_ids)
