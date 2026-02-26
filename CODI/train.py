@@ -3,7 +3,6 @@ import copy
 import logging
 import os
 import re
-import ast
 from datetime import datetime
 from pathlib import Path
 from dataclasses import dataclass
@@ -22,6 +21,12 @@ from src.model import (
     ModelArguments,
     DataArguments,
     TrainingArguments,
+)
+from src.messages_pipeline import (
+    build_tokens_from_messages,
+    extract_explain_steps_ids,
+    is_trainable_message,
+    normalise_messages_for_training,
 )
 
 
@@ -408,238 +413,20 @@ def train():
                     ref_answer_position=ref_answer_position, model_answer_position=model_answer_position, \
                         ref_eos_position=ref_eos_position, model_eos_position=model_eos_position, ref_labels=ref_labels)
 
-    def _is_trainable_message(msg: Dict) -> bool:
-        loss_mask = msg.get("loss_mask", None)
-        if loss_mask is not None:
-            if isinstance(loss_mask, str):
-                if loss_mask.strip().lower() in {"true", "yes"}:
-                    return True
-                if loss_mask.strip().lower() in {"false", "no"}:
-                    return False
-            return int(loss_mask) == 1
-        return str(msg.get("role", "")).lower() == "assistant"
-
-    def _extract_text_content(content: Any) -> str:
-        if content is None:
-            return ""
-        if isinstance(content, str):
-            return content
-        if isinstance(content, dict):
-            if "text" in content:
-                return str(content["text"])
-            if "content" in content:
-                return str(content["content"])
-            return str(content)
-        if isinstance(content, list):
-            chunks = []
-            for item in content:
-                if isinstance(item, dict):
-                    if item.get("type", None) == "text":
-                        text = item.get("text", "")
-                        if text:
-                            chunks.append(str(text))
-                    elif "text" in item:
-                        chunks.append(str(item["text"]))
-                    elif "content" in item:
-                        chunks.append(str(item["content"]))
-                else:
-                    chunks.append(str(item))
-            return "\n".join([c for c in chunks if c.strip()])
-        return str(content)
-
-    def _coerce_messages(raw_messages: Any) -> List[Dict]:
-        if raw_messages is None:
-            return []
-        if isinstance(raw_messages, str):
-            parsed = None
-            try:
-                parsed = json.loads(raw_messages)
-            except Exception:
-                try:
-                    parsed = ast.literal_eval(raw_messages)
-                except Exception:
-                    return []
-            raw_messages = parsed
-
-        if isinstance(raw_messages, dict):
-            for key in ("messages", "conversation", "conversations", "chat"):
-                value = raw_messages.get(key, None)
-                if isinstance(value, list):
-                    raw_messages = value
-                    break
-
-        if not isinstance(raw_messages, list):
-            return []
-
-        normalized_list = []
-        for msg in raw_messages:
-            if isinstance(msg, dict):
-                normalized_list.append(msg)
-            elif isinstance(msg, (list, tuple)) and len(msg) >= 2:
-                normalized_list.append({"role": msg[0], "content": msg[1]})
-        return normalized_list
-
-    def _normalise_messages(raw_messages: Any) -> List[Dict[str, str]]:
-        raw_messages = _coerce_messages(raw_messages)
-        normalized = []
-        for msg in raw_messages:
-            if not isinstance(msg, dict):
-                continue
-            role = str(msg.get("role", "")).lower().strip()
-            content = _extract_text_content(msg.get("content", ""))
-            if role == "" or content == "":
-                continue
-            loss_mask = msg.get("loss_mask", 1 if role == "assistant" else 0)
-            normalized.append(
-                {
-                    "role": role,
-                    "content": content,
-                    "loss_mask": loss_mask,
-                }
-            )
-        return normalized
-
-    def _build_tokens_from_messages(
-        messages: Sequence[Dict[str, str]], tokenizer: transformers.PreTrainedTokenizer
-    ) -> Tuple[List[int], List[int]]:
-        use_chat_template = hasattr(tokenizer, "apply_chat_template") and bool(
-            getattr(tokenizer, "chat_template", None)
-        )
-        if use_chat_template:
-            full_ids: List[int] = []
-            full_labels: List[int] = []
-            for idx, msg in enumerate(messages):
-                partial_ids = tokenizer.apply_chat_template(
-                    list(messages[: idx + 1]),
-                    tokenize=True,
-                    add_generation_prompt=False,
-                )
-                if isinstance(partial_ids, torch.Tensor):
-                    partial_ids = partial_ids.tolist()
-
-                if partial_ids[: len(full_ids)] != full_ids:
-                    use_chat_template = False
-                    break
-
-                delta = partial_ids[len(full_ids) :]
-                full_ids = partial_ids
-                if _is_trainable_message(msg):
-                    full_labels.extend(delta)
-                else:
-                    full_labels.extend([IGNORE_INDEX] * len(delta))
-
-            if use_chat_template:
-                return full_ids, full_labels
-
-        full_ids = []
-        full_labels = []
-        for idx, msg in enumerate(messages):
-            role = msg["role"]
-            content = msg["content"].strip()
-            prefix = "System" if role == "system" else ("User" if role == "user" else "Assistant")
-            text = f"{prefix}: {content}\n"
-            msg_ids = tokenizer.encode(text, add_special_tokens=(idx == 0))
-            full_ids.extend(msg_ids)
-            if _is_trainable_message(msg):
-                full_labels.extend(msg_ids)
-            else:
-                full_labels.extend([IGNORE_INDEX] * len(msg_ids))
-        return full_ids, full_labels
-
-    def _split_reasoning_steps(reasoning_text: str) -> List[str]:
-        text = reasoning_text.strip()
-        if not text:
-            return []
-
-        line_steps = []
-        for line in text.splitlines():
-            step = line.strip()
-            if not step:
-                continue
-            step = re.sub(r"^[-*]\s+", "", step)
-            step = re.sub(r"^\d+[\)\.\:\-]\s+", "", step)
-            if step:
-                line_steps.append(step)
-
-        if len(line_steps) >= 2:
-            return line_steps
-
-        sentence_steps = [
-            s.strip()
-            for s in re.split(r"(?<=[\.\!\?])\s+", text)
-            if s.strip()
-        ]
-        if len(sentence_steps) >= 2:
-            return sentence_steps
-
-        chunk_steps = [s.strip() for s in re.split(r";\s+|,\s+", text) if s.strip()]
-        if len(chunk_steps) >= 2:
-            return chunk_steps
-
-        return [text]
-
-    def _extract_explain_steps_ids(
-        messages: Sequence[Dict[str, str]], eot_id: int
-    ) -> List[List[int]]:
-        max_steps = training_args.num_latent + 1
-        step_texts: List[str] = []
-
-        for msg in messages:
-            if not _is_trainable_message(msg):
-                continue
-            content = msg["content"]
-            think_blocks = re.findall(
-                r"<think>(.*?)</think>",
-                content,
-                flags=re.IGNORECASE | re.DOTALL,
-            )
-            for block in think_blocks:
-                step_texts.extend(_split_reasoning_steps(block))
-
-        if len(step_texts) == 0:
-            fallback_text = []
-            for msg in messages:
-                if _is_trainable_message(msg):
-                    text = re.sub(r"<[^>]+>", " ", msg["content"])
-                    fallback_text.append(text.strip())
-            step_texts = _split_reasoning_steps("\n".join([t for t in fallback_text if t]))
-
-        if len(step_texts) > max_steps:
-            step_texts = step_texts[: max_steps - 1] + [
-                " ".join(step_texts[max_steps - 1 :])
-            ]
-
-        step_ids: List[List[int]] = []
-        for step in step_texts:
-            step_text = step.strip()
-            if not step_text:
-                continue
-            ids = tokenizer.encode(
-                f"<think>{step_text}</think>",
-                add_special_tokens=False,
-            )
-            ids = ids + [eot_id]
-            step_ids.append(ids if len(ids) > 0 else [tokenizer.pad_token_id])
-
-        while len(step_ids) < max_steps:
-            step_ids.append([tokenizer.pad_token_id])
-
-        if len(step_ids) == 0:
-            step_ids = [[tokenizer.pad_token_id] for _ in range(max_steps)]
-        return step_ids[:max_steps]
-
     def _build_messages_training_instance(raw_messages: Sequence[Dict], bot_id: int, eot_id: int):
-        messages = _normalise_messages(raw_messages)
-        if len(messages) == 0:
-            return None
+        messages, normalize_error = normalise_messages_for_training(raw_messages)
+        if normalize_error is not None:
+            return None, normalize_error
 
-        full_ids, full_labels = _build_tokens_from_messages(messages, tokenizer)
+        full_ids, full_labels = build_tokens_from_messages(
+            messages, tokenizer, ignore_index=IGNORE_INDEX
+        )
         if len(full_ids) == 0:
-            return None
+            return None, "empty_tokenized_sample"
 
         if tokenizer.eos_token_id is not None and full_ids[-1] != tokenizer.eos_token_id:
             full_ids.append(tokenizer.eos_token_id)
-            if _is_trainable_message(messages[-1]):
+            if is_trainable_message(messages[-1]):
                 full_labels.append(tokenizer.eos_token_id)
             else:
                 full_labels.append(IGNORE_INDEX)
@@ -655,21 +442,27 @@ def train():
                 first_target_idx = idx
                 break
         if first_target_idx is None or first_target_idx >= len(full_ids):
-            return None
+            return None, "no_supervised_tokens"
 
         prompt_ids = full_ids[:first_target_idx]
         assistant_ids = full_ids[first_target_idx:]
         assistant_labels = full_labels[first_target_idx:]
 
         if len(assistant_ids) == 0:
-            return None
+            return None, "empty_answer_segment"
 
         encoder_input_ids = torch.tensor(prompt_ids + [bot_id], dtype=torch.long)
         decoder_input_ids = torch.tensor([eot_id] + assistant_ids, dtype=torch.long)
         labels = torch.tensor([IGNORE_INDEX] + assistant_labels, dtype=torch.long)
         ref_input_ids = torch.tensor(full_ids, dtype=torch.long)
         ref_labels = torch.tensor(full_labels, dtype=torch.long)
-        explain_steps_ids = _extract_explain_steps_ids(messages, eot_id)
+        explain_steps_ids = extract_explain_steps_ids(
+            messages=messages,
+            tokenizer=tokenizer,
+            eot_id=eot_id,
+            num_latent=training_args.num_latent,
+            pad_id=tokenizer.pad_token_id,
+        )
 
         return dict(
             encoder_input_ids=encoder_input_ids,
@@ -680,7 +473,7 @@ def train():
             model_answer_position=1,
             ref_labels=ref_labels,
             explain_steps_ids=explain_steps_ids,
-        )
+        ), None
 
     def _decode_ids_with_markers(
         ids: Sequence[int],
@@ -1025,6 +818,7 @@ def train():
             self.instances = []
             missing_messages_field = 0
             malformed_messages = 0
+            filtered_reasons: Dict[str, int] = {}
             total_rows = 0
 
             column_names = []
@@ -1051,20 +845,27 @@ def train():
                 if not isinstance(messages, (list, str, dict)):
                     malformed_messages += 1
                     continue
-                instance = _build_messages_training_instance(messages, bot, eot)
+                instance, reason = _build_messages_training_instance(messages, bot, eot)
                 if instance is None:
                     malformed_messages += 1
+                    reason_key = reason or "unknown"
+                    filtered_reasons[reason_key] = filtered_reasons.get(reason_key, 0) + 1
                     continue
                 self.instances.append(instance)
 
             if training_args.exp_mode:
                 self.instances = self.instances[:training_args.exp_data_num]
 
+            reason_summary = "none"
+            if len(filtered_reasons) > 0:
+                reason_summary = ",".join(
+                    [f"{k}:{v}" for k, v in sorted(filtered_reasons.items())]
+                )
             print(f"{len(self.instances)} data in total...")
             print(
                 f"[messages parse stats] rows={total_rows}, valid={len(self.instances)}, "
                 f"missing_field={missing_messages_field}, filtered_or_malformed={malformed_messages}, "
-                f"max_token_num={training_args.max_token_num}"
+                f"max_token_num={training_args.max_token_num}, drop_reasons={reason_summary}"
             )
             if len(self.instances) == 0:
                 msg = (
@@ -1072,6 +873,8 @@ def train():
                     f"`messages_field={messages_field}` rows={total_rows}, "
                     f"missing_field={missing_messages_field}, malformed={malformed_messages}."
                 )
+                if len(filtered_reasons) > 0:
+                    msg += f" drop_reasons={filtered_reasons}."
                 if len(column_names) > 0:
                     msg += f" Available columns: {column_names}"
                 raise ValueError(
