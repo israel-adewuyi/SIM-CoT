@@ -102,27 +102,28 @@ print(device)
 class CustomTrainer(Trainer):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self._custom_log_buffer_step: Optional[int] = None
         self._custom_log_sums: Dict[str, float] = {}
         self._custom_log_counts: Dict[str, int] = {}
+        self._pending_custom_logs: Optional[Dict[str, float]] = None
 
     def _reset_custom_log_buffer(self):
-        self._custom_log_buffer_step = None
         self._custom_log_sums = {}
         self._custom_log_counts = {}
 
-    def _accumulate_custom_logs(self, step: int, logs: Dict[str, Optional[float]]):
-        if self._custom_log_buffer_step is None:
-            self._custom_log_buffer_step = step
-        elif self._custom_log_buffer_step != step:
-            self._reset_custom_log_buffer()
-            self._custom_log_buffer_step = step
-
+    def _accumulate_custom_logs(self, logs: Dict[str, Optional[float]]):
         for key, value in logs.items():
             if value is None:
                 continue
             self._custom_log_sums[key] = self._custom_log_sums.get(key, 0.0) + float(value)
             self._custom_log_counts[key] = self._custom_log_counts.get(key, 0) + 1
+
+    def _prepare_custom_log_payload(self) -> Dict[str, float]:
+        averaged_logs: Dict[str, float] = {}
+        for key, value_sum in self._custom_log_sums.items():
+            count = self._custom_log_counts.get(key, 0)
+            if count > 0:
+                averaged_logs[key] = value_sum / count
+        return averaged_logs
 
     def _sync_gradients_now(self) -> bool:
         accelerator = getattr(self, "accelerator", None)
@@ -151,30 +152,19 @@ class CustomTrainer(Trainer):
         loss = outputs["loss"]
         loss_for_log = loss.detach() if isinstance(loss, torch.Tensor) else loss
 
-        should_log_this_step = (step % self.args.logging_steps == 0)
-        if should_log_this_step:
-            logs = {
-                "loss": _to_scalar(loss_for_log),
-                "ce_loss": _to_scalar(outputs.get("ce_loss")),
-                "distill_loss": _to_scalar(outputs.get("distill_loss")),
-                "ref_ce_loss": _to_scalar(outputs.get("ref_ce_loss")),
-            }
-            self._accumulate_custom_logs(step, logs)
-        elif (
-            self._custom_log_buffer_step is not None
-            and self._custom_log_buffer_step != step
-        ):
-            # Defensive clear to avoid carrying stale stats across optimizer steps.
-            self._reset_custom_log_buffer()
+        logs = {
+            "loss": _to_scalar(loss_for_log),
+            "ce_loss": _to_scalar(outputs.get("ce_loss")),
+            "distill_loss": _to_scalar(outputs.get("distill_loss")),
+            "ref_ce_loss": _to_scalar(outputs.get("ref_ce_loss")),
+        }
+        self._accumulate_custom_logs(logs)
 
-        if should_log_this_step and self._sync_gradients_now() and self.is_world_process_zero():
-            averaged_logs = {}
-            for key, value_sum in self._custom_log_sums.items():
-                count = self._custom_log_counts.get(key, 0)
-                if count > 0:
-                    averaged_logs[key] = value_sum / count
-            if len(averaged_logs) > 0:
-                self.log(averaged_logs)
+        # Final micro-step of the accumulation window: stage averaged metrics.
+        # They are logged in _maybe_log_save_evaluate, which runs after optimizer update.
+        if self._sync_gradients_now():
+            averaged_logs = self._prepare_custom_log_payload()
+            self._pending_custom_logs = averaged_logs if len(averaged_logs) > 0 else None
             self._reset_custom_log_buffer()
         #"ce_loss": ce_loss_total, "mse_loss": mse_loss_total, "ref_ce_loss": ref_ce_loss
         # if step % self.args.logging_steps == 0:
@@ -185,6 +175,12 @@ class CustomTrainer(Trainer):
     def log(self, logs, start_time=None):
         if self.state.global_step is not None:
             super().log(logs, start_time=start_time)
+
+    def _maybe_log_save_evaluate(self, *args, **kwargs):
+        if self.is_world_process_zero() and self._pending_custom_logs is not None:
+            self.log(self._pending_custom_logs)
+            self._pending_custom_logs = None
+        return super()._maybe_log_save_evaluate(*args, **kwargs)
 
     def _save(self, output_dir: Optional[str] = None, state_dict=None):
         """Retry save with non-safetensors if shared-tensor safetensors save fails."""
