@@ -104,7 +104,6 @@ class CustomTrainer(Trainer):
         super().__init__(*args, **kwargs)
         self._custom_log_sums: Dict[str, float] = {}
         self._custom_log_counts: Dict[str, int] = {}
-        self._pending_custom_logs: Optional[Dict[str, float]] = None
 
     def _reset_custom_log_buffer(self):
         self._custom_log_sums = {}
@@ -124,12 +123,6 @@ class CustomTrainer(Trainer):
             if count > 0:
                 averaged_logs[key] = value_sum / count
         return averaged_logs
-
-    def _sync_gradients_now(self) -> bool:
-        accelerator = getattr(self, "accelerator", None)
-        if accelerator is None:
-            return True
-        return bool(getattr(accelerator, "sync_gradients", True))
 
     def compute_loss(self, model, inputs, num_items_in_batch):
         # Extract the global step from the optimizer
@@ -159,13 +152,6 @@ class CustomTrainer(Trainer):
             "ref_ce_loss": _to_scalar(outputs.get("ref_ce_loss")),
         }
         self._accumulate_custom_logs(logs)
-
-        # Final micro-step of the accumulation window: stage averaged metrics.
-        # They are logged in _maybe_log_save_evaluate, which runs after optimizer update.
-        if self._sync_gradients_now():
-            averaged_logs = self._prepare_custom_log_payload()
-            self._pending_custom_logs = averaged_logs if len(averaged_logs) > 0 else None
-            self._reset_custom_log_buffer()
         #"ce_loss": ce_loss_total, "mse_loss": mse_loss_total, "ref_ce_loss": ref_ce_loss
         # if step % self.args.logging_steps == 0:
         #     self.log({"loss": loss.item(), "ce_loss": outputs["ce_loss"], "distill_loss": outputs["distill_loss"], "ref_ce_loss": outputs["ref_ce_loss"],})
@@ -177,9 +163,11 @@ class CustomTrainer(Trainer):
             super().log(logs, start_time=start_time)
 
     def _maybe_log_save_evaluate(self, *args, **kwargs):
-        if self.is_world_process_zero() and self._pending_custom_logs is not None:
-            self.log(self._pending_custom_logs)
-            self._pending_custom_logs = None
+        if len(self._custom_log_counts) > 0:
+            averaged_logs = self._prepare_custom_log_payload()
+            if len(averaged_logs) > 0:
+                self.log(averaged_logs)
+            self._reset_custom_log_buffer()
         return super()._maybe_log_save_evaluate(*args, **kwargs)
 
     def _save(self, output_dir: Optional[str] = None, state_dict=None):
@@ -297,9 +285,9 @@ def train():
                 "after sanitization. Example: --run_name my_experiment"
             )
 
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         tb_root = Path("outputs/tb").resolve()
-        logging_dir = tb_root / f"{sanitized_run_name}__{timestamp}"
+        # Keep logging_dir stable across all distributed ranks so TensorBoard reads a single path.
+        logging_dir = tb_root / sanitized_run_name
         os.makedirs(logging_dir, exist_ok=True)
         training_args.logging_dir = str(logging_dir)
         os.environ["TENSORBOARD_LOGGING_DIR"] = training_args.logging_dir
