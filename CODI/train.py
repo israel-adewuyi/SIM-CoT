@@ -100,6 +100,8 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(device)
 
 class CustomTrainer(Trainer):
+    _last_custom_log_step: Optional[int] = None
+
     def compute_loss(self, model, inputs, num_items_in_batch):
         # Extract the global step from the optimizer
         step = self.state.global_step
@@ -127,7 +129,8 @@ class CustomTrainer(Trainer):
                 "distill_loss": _to_scalar(outputs.get("distill_loss")),
                 "ref_ce_loss": _to_scalar(outputs.get("ref_ce_loss")),
             }
-            if self.is_world_process_zero():
+            if self.is_world_process_zero() and self._last_custom_log_step != step:
+                self._last_custom_log_step = step
                 self.log(logs)
         #"ce_loss": ce_loss_total, "mse_loss": mse_loss_total, "ref_ce_loss": ref_ce_loss
         # if step % self.args.logging_steps == 0:
