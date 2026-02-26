@@ -127,7 +127,7 @@ class CustomTrainer(Trainer):
                 "distill_loss": _to_scalar(outputs.get("distill_loss")),
                 "ref_ce_loss": _to_scalar(outputs.get("ref_ce_loss")),
             }
-            if not hasattr(self, "is_global_zero") or self.is_global_zero:
+            if self.is_world_process_zero():
                 self.log(logs)
         #"ce_loss": ce_loss_total, "mse_loss": mse_loss_total, "ref_ce_loss": ref_ce_loss
         # if step % self.args.logging_steps == 0:
@@ -137,8 +137,7 @@ class CustomTrainer(Trainer):
 
     def log(self, logs, start_time=None):
         if self.state.global_step is not None:
-            for k, v in logs.items():
-                super().log({k: v})
+            super().log(logs, start_time=start_time)
 
     def _save(self, output_dir: Optional[str] = None, state_dict=None):
         """Retry save with non-safetensors if shared-tensor safetensors save fails."""
