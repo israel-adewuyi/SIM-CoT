@@ -100,7 +100,35 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(device)
 
 class CustomTrainer(Trainer):
-    _last_custom_log_step: Optional[int] = None
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._custom_log_buffer_step: Optional[int] = None
+        self._custom_log_sums: Dict[str, float] = {}
+        self._custom_log_counts: Dict[str, int] = {}
+
+    def _reset_custom_log_buffer(self):
+        self._custom_log_buffer_step = None
+        self._custom_log_sums = {}
+        self._custom_log_counts = {}
+
+    def _accumulate_custom_logs(self, step: int, logs: Dict[str, Optional[float]]):
+        if self._custom_log_buffer_step is None:
+            self._custom_log_buffer_step = step
+        elif self._custom_log_buffer_step != step:
+            self._reset_custom_log_buffer()
+            self._custom_log_buffer_step = step
+
+        for key, value in logs.items():
+            if value is None:
+                continue
+            self._custom_log_sums[key] = self._custom_log_sums.get(key, 0.0) + float(value)
+            self._custom_log_counts[key] = self._custom_log_counts.get(key, 0) + 1
+
+    def _sync_gradients_now(self) -> bool:
+        accelerator = getattr(self, "accelerator", None)
+        if accelerator is None:
+            return True
+        return bool(getattr(accelerator, "sync_gradients", True))
 
     def compute_loss(self, model, inputs, num_items_in_batch):
         # Extract the global step from the optimizer
@@ -122,16 +150,32 @@ class CustomTrainer(Trainer):
         outputs = model(**inputs)
         loss = outputs["loss"]
         loss_for_log = loss.detach() if isinstance(loss, torch.Tensor) else loss
-        if step % self.args.logging_steps == 0:
+
+        should_log_this_step = (step % self.args.logging_steps == 0)
+        if should_log_this_step:
             logs = {
                 "loss": _to_scalar(loss_for_log),
                 "ce_loss": _to_scalar(outputs.get("ce_loss")),
                 "distill_loss": _to_scalar(outputs.get("distill_loss")),
                 "ref_ce_loss": _to_scalar(outputs.get("ref_ce_loss")),
             }
-            if self.is_world_process_zero() and self._last_custom_log_step != step:
-                self._last_custom_log_step = step
-                self.log(logs)
+            self._accumulate_custom_logs(step, logs)
+        elif (
+            self._custom_log_buffer_step is not None
+            and self._custom_log_buffer_step != step
+        ):
+            # Defensive clear to avoid carrying stale stats across optimizer steps.
+            self._reset_custom_log_buffer()
+
+        if should_log_this_step and self._sync_gradients_now() and self.is_world_process_zero():
+            averaged_logs = {}
+            for key, value_sum in self._custom_log_sums.items():
+                count = self._custom_log_counts.get(key, 0)
+                if count > 0:
+                    averaged_logs[key] = value_sum / count
+            if len(averaged_logs) > 0:
+                self.log(averaged_logs)
+            self._reset_custom_log_buffer()
         #"ce_loss": ce_loss_total, "mse_loss": mse_loss_total, "ref_ce_loss": ref_ce_loss
         # if step % self.args.logging_steps == 0:
         #     self.log({"loss": loss.item(), "ce_loss": outputs["ce_loss"], "distill_loss": outputs["distill_loss"], "ref_ce_loss": outputs["ref_ce_loss"],})
