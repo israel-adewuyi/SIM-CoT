@@ -74,6 +74,19 @@ def read_json(file_path):
         print(f"读取JSON文件时出错: {e}")
         return None
 
+def read_jsonl(file_path):
+    data = []
+    with open(file_path, "r", encoding="utf-8") as file:
+        for line_no, line in enumerate(file, start=1):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                data.append(json.loads(line))
+            except json.JSONDecodeError as e:
+                raise ValueError(f"Invalid JSON in {file_path} at line {line_no}: {e}") from e
+    return data
+
 def write_json(data, file_path):
     """
     将Python对象写入指定路径的JSON文件中。
@@ -84,7 +97,13 @@ def write_json(data, file_path):
     except Exception as e:
         print(f"写入JSON文件时出错: {e}")
 
-def evaluation(model_args, data_args, training_args):
+def write_jsonl(data, file_path):
+    os.makedirs(os.path.dirname(file_path), exist_ok=True)
+    with open(file_path, "w", encoding="utf-8") as file:
+        for row in data:
+            file.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+def evaluation(model_args, data_args, training_args, iteration_idx: int = 0):
     if model_args.lora_init:
         task_type = TaskType.CAUSAL_LM
         if any(name in model_args.model_name_or_path.lower() for name in ["llama", "mistral", "falcon", "qwen"]):
@@ -147,7 +166,16 @@ def evaluation(model_args, data_args, training_args):
     logging.warning("Downloading Data")
     question_name = "question"
     answer_name = "answer"
-    if "gsm-hard" == data_args.data_name:
+    generation_only = data_args.data_name == "local-jsonl"
+    if generation_only:
+        if not data_args.data_path:
+            raise ValueError("--data_path is required when --data_name local-jsonl is used.")
+        if not data_args.data_path.endswith(".jsonl"):
+            raise ValueError(f"--data_path must point to a .jsonl file, got: {data_args.data_path}")
+        if not os.path.isfile(data_args.data_path):
+            raise ValueError(f"JSONL file does not exist: {data_args.data_path}")
+        test_set = read_jsonl(data_args.data_path)
+    elif "gsm-hard" == data_args.data_name:
         # dataset = load_dataset("juyoung-trl/gsm-hard")
         # test_set = dataset['train']
         # question_name = "instruction"
@@ -177,35 +205,42 @@ def evaluation(model_args, data_args, training_args):
         raise NotImplementedError
 
     logging.warning("Formatting inputs...")
-    question = [f"{example[question_name].strip().replace('  ', ' ')}" for example in test_set]
+    question = []
+    for idx, example in enumerate(test_set):
+        if question_name not in example:
+            raise ValueError(f"Sample at index {idx} is missing required key '{question_name}'.")
+        question.append(f"{str(example[question_name]).strip().replace('  ', ' ')}")
     answer = []
 
-    # get numerical answer
-    for example in test_set:
-        example = example[answer_name]
-        if isinstance(example, bool):
-            answer.append(example)
-            continue
-        if example in ["True", "False"]:
-            if example == "True":
-                ans = True
+    if not generation_only:
+        # get numerical answer
+        for idx, example in enumerate(test_set):
+            if answer_name not in example:
+                raise ValueError(f"Sample at index {idx} is missing required key '{answer_name}'.")
+            example = example[answer_name]
+            if isinstance(example, bool):
+                answer.append(example)
+                continue
+            if example in ["True", "False"]:
+                if example == "True":
+                    ans = True
+                else:
+                    ans = False
+                answer.append(ans)
+                continue
+            if example in "ABCDE":
+                answer.append(example)
+                continue
+            if "####" in example:
+                ans = example.split('####')[-1]
             else:
-                ans = False
+                ans = example
+            ans = ans.replace(',', '')  # handle numbers like 2,000
+            try:
+                ans = float(ans)
+            except ValueError:
+                ans = float("inf")
             answer.append(ans)
-            continue
-        if example in "ABCDE":
-            answer.append(example)
-            continue
-        if "####" in example:
-            ans = example.split('####')[-1]
-        else:
-            ans = example
-        ans = ans.replace(',', '')  # handle numbers like 2,000
-        try:
-            ans = float(ans)
-        except ValueError:
-            ans = float("inf")
-        answer.append(ans)
 
     logging.warning("Tokenizing inputs...")
     eval_step = math.ceil(len(question)/data_args.batch_size)
@@ -247,6 +282,7 @@ def evaluation(model_args, data_args, training_args):
     }
 
     ans_pred_list = []
+    generation_records = []
     ans_pred_list_accu_at_n_passes = []
     attention_map_weights = []
     attention_to_latents_against_len_sum = []
@@ -318,7 +354,6 @@ def evaluation(model_args, data_args, training_args):
             pred_tokens = [[] for _ in range(batch_size)]
             for i in range(gen_kwargs["max_new_tokens"]):
                 seq_len += 1
-                import pdb; pdb.set_trace()
                 out = model.codi(
                         inputs_embeds=output,
                         output_hidden_states=False,
@@ -383,9 +418,28 @@ def evaluation(model_args, data_args, training_args):
                     print(f"Q: {question[step*data_args.batch_size+mini_step]}")
                     print(decoded_pred)
                     print(f"Question {step*data_args.batch_size+mini_step} Ends")
-                    print(f"Prediction={extract_answer_number(decoded_pred)}; Groundtruth={answer[step*data_args.batch_size+mini_step]}")
+                    if generation_only:
+                        print("Generation-only mode: skipping accuracy parsing.")
+                    else:
+                        print(f"Prediction={extract_answer_number(decoded_pred)}; Groundtruth={answer[step*data_args.batch_size+mini_step]}")
                     print("")
-                ans_pred_list.append(extract_answer_number(decoded_pred))
+                if generation_only:
+                    generation_records.append(
+                        {
+                            "index": step*data_args.batch_size+mini_step,
+                            "question": question[step*data_args.batch_size+mini_step],
+                            "prediction": decoded_pred,
+                        }
+                    )
+                else:
+                    ans_pred_list.append(extract_answer_number(decoded_pred))
+    if generation_only:
+        output_root = training_args.output_dir if training_args.output_dir else "eval_outputs"
+        output_file = os.path.join(output_root, "predictions", f"{data_args.data_name}_iter_{iteration_idx}.jsonl")
+        write_jsonl(generation_records, output_file)
+        print(f"Saved {len(generation_records)} generations to {output_file}")
+        return {"mode": "generation_only", "output_file": output_file, "num_samples": len(generation_records)}
+
     write_json({"ans": ans_pred_list}, f"/mnt/shared-storage-user/weixilin/MLLM/coconut/codi/results/{data_args.data_name}.json")
     accuracy = compute_accuracy(answer, ans_pred_list)
 
@@ -437,8 +491,13 @@ if __name__ == "__main__":
     parser = transformers.HfArgumentParser((ModelArguments, DataArguments, TrainingArguments))
     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
 
-    accu_list = []
+    eval_results = []
     for i in range(training_args.inf_num_iterations):
-        accu = evaluation(model_args, data_args, training_args)
-        accu_list.append(accu)
-    print(f"Average accuracy over {training_args.inf_num_iterations} sampling: {sum(accu_list)/len(accu_list)}")
+        eval_result = evaluation(model_args, data_args, training_args, iteration_idx=i)
+        eval_results.append(eval_result)
+
+    if data_args.data_name == "local-jsonl":
+        for idx, result in enumerate(eval_results):
+            print(f"Iteration {idx}: {result['output_file']} ({result['num_samples']} samples)")
+    else:
+        print(f"Average accuracy over {training_args.inf_num_iterations} sampling: {sum(eval_results)/len(eval_results)}")
