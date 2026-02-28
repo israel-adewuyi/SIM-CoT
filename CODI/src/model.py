@@ -556,12 +556,15 @@ class CODI(torch.nn.Module):
                                        stop_ids=(self.tokenizer.eos_token_id, self.tokenizer.pad_token_id))
                 steps_pad_list = pad_steps(steps_list, pad_id=self.tokenizer.pad_token_id)
             elif 'qwen' in self.model_args.model_name_or_path.lower():
+                qwen_step_eot = self.tokenizer.eos_token_id
+                if qwen_step_eot is None:
+                    qwen_step_eot = self.eot_id
                 steps_list = get_qwen_sentence_steps(
                     ref_input_ids=ref_input_ids,
                     ref_labels=ref_labels,
                     tokenizer=self.tokenizer,
                     latent_num=self.num_latent + 1,
-                    eot_id=self.eot_id,
+                    eot_id=qwen_step_eot,
                     pad_id=self.tokenizer.pad_token_id,
                 )
                 steps_pad_list = pad_steps(steps_list, pad_id=self.tokenizer.pad_token_id)
