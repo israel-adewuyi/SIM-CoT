@@ -4,6 +4,7 @@ import logging
 import os
 import re
 import random
+import time
 from datetime import datetime
 from dataclasses import dataclass, field
 from typing import Dict, Optional, Sequence
@@ -113,6 +114,89 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(device)
 
 class CustomTrainer(Trainer):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._loss_keys = (
+            "Loss/total",
+            "Loss/ce",
+            "Loss/distill",
+            "Loss/ref_ce",
+            "Loss/explain",
+        )
+        self._reset_micro_accum()
+        self._pending_step_metrics: Dict[int, Dict[str, float]] = {}
+        self._pending_step_tokens: Dict[int, float] = {}
+        self._last_log_wall_time = time.time()
+        self._last_log_step = 0
+
+    def _reset_micro_accum(self):
+        self._micro_loss_sums = {k: 0.0 for k in self._loss_keys}
+        self._micro_loss_counts = {k: 0 for k in self._loss_keys}
+        self._micro_batch_count = 0
+        self._micro_token_count = 0.0
+
+    def _extract_token_count(self, inputs: Dict) -> int:
+        token_count = 0
+        pad_token_id = self.tokenizer.pad_token_id if self.tokenizer is not None else 0
+        with torch.no_grad():
+            if "encoder_attention_mask" in inputs and isinstance(inputs["encoder_attention_mask"], torch.Tensor):
+                token_count += int(inputs["encoder_attention_mask"].sum().item())
+            elif "encoder_input_ids" in inputs and isinstance(inputs["encoder_input_ids"], torch.Tensor):
+                token_count += int(inputs["encoder_input_ids"].ne(pad_token_id).sum().item())
+
+            if "labels" in inputs and isinstance(inputs["labels"], torch.Tensor):
+                token_count += int(inputs["labels"].ne(IGNORE_INDEX).sum().item())
+        return token_count
+
+    def _accumulate_micro_metric(self, key: str, value: Optional[float]):
+        if value is None:
+            return
+        self._micro_loss_sums[key] += float(value)
+        self._micro_loss_counts[key] += 1
+
+    def _flush_micro_accum_to_pending(self, target_step: int):
+        if self._micro_batch_count == 0:
+            return
+
+        step_metrics: Dict[str, float] = {}
+        for key in self._loss_keys:
+            count = self._micro_loss_counts[key]
+            if count > 0:
+                step_metrics[key] = self._micro_loss_sums[key] / count
+
+        effective_batch_size = (
+            self.args.per_device_train_batch_size
+            * max(1, int(getattr(self.args, "world_size", 1) or 1))
+            * max(1, self.args.gradient_accumulation_steps)
+        )
+        step_metrics["Data/effective_batch_size"] = float(effective_batch_size)
+        step_metrics["Data/grad_accum_steps"] = float(max(1, self.args.gradient_accumulation_steps))
+
+        self._pending_step_metrics[target_step] = step_metrics
+        self._pending_step_tokens[target_step] = float(self._micro_token_count)
+        self._reset_micro_accum()
+
+    def _consume_pending_step_metrics(self, current_step: int):
+        pending_steps = [s for s in sorted(self._pending_step_metrics.keys()) if s <= current_step]
+        if not pending_steps:
+            return {}, 0.0
+
+        merged_sums: Dict[str, float] = {}
+        merged_counts: Dict[str, int] = {}
+        consumed_tokens = 0.0
+        for step in pending_steps:
+            consumed_tokens += self._pending_step_tokens.pop(step, 0.0)
+            step_metrics = self._pending_step_metrics.pop(step)
+            for key, value in step_metrics.items():
+                merged_sums[key] = merged_sums.get(key, 0.0) + float(value)
+                merged_counts[key] = merged_counts.get(key, 0) + 1
+
+        merged = {
+            key: merged_sums[key] / max(1, merged_counts[key])
+            for key in merged_sums
+        }
+        return merged, consumed_tokens
+
     def compute_loss(self, model, inputs, num_items_in_batch):
         # Extract the global step from the optimizer
         step = self.state.global_step
@@ -123,7 +207,7 @@ class CustomTrainer(Trainer):
         num_epochs = self.args.num_train_epochs
         dataset_size = len(self.train_dataset)
 
-        effective_batch_size = batch_size * self.args.world_size * gradient_accumulation_steps
+        effective_batch_size = batch_size * max(1, int(getattr(self.args, "world_size", 1) or 1)) * gradient_accumulation_steps
         total_steps = ceil(dataset_size / effective_batch_size) * num_epochs
 
         # Add the step information to the inputs dictionary
@@ -132,26 +216,70 @@ class CustomTrainer(Trainer):
         # Call the model's forward method
         outputs = model(**inputs)
         loss = outputs["loss"]
-        loss_for_log = loss.detach() if isinstance(loss, torch.Tensor) else loss
-        if step % self.args.logging_steps == 0:
-            logs = {
-                "loss": _to_scalar(loss_for_log),
-                "ce_loss": _to_scalar(outputs.get("ce_loss")),
-                "distill_loss": _to_scalar(outputs.get("distill_loss")),
-                "ref_ce_loss": _to_scalar(outputs.get("ref_ce_loss")),
-            }
-            if not hasattr(self, "is_global_zero") or self.is_global_zero:
-                self.log(logs)
-        #"ce_loss": ce_loss_total, "mse_loss": mse_loss_total, "ref_ce_loss": ref_ce_loss
-        # if step % self.args.logging_steps == 0:
-        #     self.log({"loss": loss.item(), "ce_loss": outputs["ce_loss"], "distill_loss": outputs["distill_loss"], "ref_ce_loss": outputs["ref_ce_loss"],})
+
+        self._micro_batch_count += 1
+        self._micro_token_count += self._extract_token_count(inputs)
+        self._accumulate_micro_metric("Loss/total", _to_scalar(loss))
+        self._accumulate_micro_metric("Loss/ce", _to_scalar(outputs.get("ce_loss")))
+        self._accumulate_micro_metric("Loss/distill", _to_scalar(outputs.get("distill_loss")))
+        self._accumulate_micro_metric("Loss/ref_ce", _to_scalar(outputs.get("ref_ce_loss")))
+        self._accumulate_micro_metric("Loss/explain", _to_scalar(outputs.get("explain_loss")))
+
+        if hasattr(self, "accelerator"):
+            should_flush = bool(self.accelerator.sync_gradients)
+        else:
+            grad_acc_steps = max(1, self.args.gradient_accumulation_steps)
+            should_flush = (self._micro_batch_count % grad_acc_steps) == 0
+
+        if should_flush:
+            # global_step is incremented after optimizer.step(), so cache metrics for the next step index.
+            self._flush_micro_accum_to_pending(int(step) + 1)
 
         return loss
 
     def log(self, logs, start_time=None):
-        if self.state.global_step is not None:
-            for k, v in logs.items():
-                super().log({k: v})
+        if not self.is_world_process_zero():
+            return
+        if self.state.global_step is None:
+            return
+
+        logs = dict(logs) if logs is not None else {}
+        global_step = int(self.state.global_step)
+        grouped_logs, consumed_tokens = self._consume_pending_step_metrics(global_step)
+
+        if "learning_rate" in logs:
+            grouped_logs["Train/lr"] = float(logs["learning_rate"])
+        if "grad_norm" in logs and logs["grad_norm"] is not None:
+            grouped_logs["Train/grad_norm"] = float(logs["grad_norm"])
+        if "epoch" in logs and logs["epoch"] is not None:
+            grouped_logs["Data/epoch"] = float(logs["epoch"])
+        if "train_runtime" in logs:
+            grouped_logs["Train/runtime_sec"] = float(logs["train_runtime"])
+        if "train_samples_per_second" in logs:
+            grouped_logs["Train/samples_per_sec"] = float(logs["train_samples_per_second"])
+        if "train_steps_per_second" in logs:
+            grouped_logs["Train/steps_per_sec"] = float(logs["train_steps_per_second"])
+        if "train_loss" in logs:
+            grouped_logs["Loss/train_avg"] = float(logs["train_loss"])
+        if "loss" in logs and "Loss/total" not in grouped_logs:
+            grouped_logs["Loss/total"] = float(logs["loss"])
+
+        grouped_logs["Data/global_step"] = float(global_step)
+
+        now = time.time()
+        step_delta = global_step - self._last_log_step
+        if step_delta > 0:
+            elapsed = max(1e-8, now - self._last_log_wall_time)
+            grouped_logs["Train/step_time_sec"] = elapsed / step_delta
+            if consumed_tokens > 0:
+                grouped_logs["Train/tokens_per_sec"] = consumed_tokens / elapsed
+            self._last_log_step = global_step
+            self._last_log_wall_time = now
+
+        try:
+            super().log(grouped_logs, start_time=start_time)
+        except TypeError:
+            super().log(grouped_logs)
 
 def _tokenize_fn(strings: Sequence[str], tokenizer: transformers.PreTrainedTokenizer) -> Dict:
     """Tokenize a list of strings."""
