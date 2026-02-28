@@ -389,6 +389,8 @@ def evaluation(model_args, data_args, training_args, iteration_idx: int = 0):
                     
                     probs = F.softmax(logits, dim=-1)
                     next_token_ids = torch.multinomial(probs, num_samples=1).squeeze(-1)
+                # Keep shape stable for the final batch (batch_size=1).
+                next_token_ids = next_token_ids.view(-1)
 
                 # Handle EOS for each sequence
                 for b in range(batch_size):
@@ -424,10 +426,12 @@ def evaluation(model_args, data_args, training_args, iteration_idx: int = 0):
                         print(f"Prediction={extract_answer_number(decoded_pred)}; Groundtruth={answer[step*data_args.batch_size+mini_step]}")
                     print("")
                 if generation_only:
+                    sample_idx = step * data_args.batch_size + mini_step
                     generation_records.append(
                         {
-                            "index": step*data_args.batch_size+mini_step,
-                            "question": question[step*data_args.batch_size+mini_step],
+                            "index": sample_idx,
+                            "question": question[sample_idx],
+                            "answer": test_set[sample_idx].get(answer_name),
                             "prediction": decoded_pred,
                         }
                     )
