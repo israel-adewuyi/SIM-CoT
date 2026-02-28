@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-DATA_PATH=/absolute/path/to/your/eval.jsonl
-CKPT_DIR=/absolute/path/to/your/checkpoints
-OUTPUT_DIR=./eval_outputs/local_jsonl
+DATA_PATH=/home/user/israel/SIM-CoT/CODI/data/v2_eval.jsonl
+CKPT_DIR=/home/user/israel/SIM-CoT/CODI/runs/qwen_4B/lora-16_nlatent-3_lr-8e4/checkpoints
+OUTPUT_DIR=/home/user/israel/SIM-CoT/CODI/runs/qwen_4B/lora-16_nlatent-3_lr-8e4/eval
 
 python test.py \
     --data_name "local-jsonl" \
@@ -12,9 +12,10 @@ python test.py \
     --model_name_or_path Qwen/Qwen3-4B \
     --seed 11 \
     --model_max_length 16384 \
+    --max_new_tokens 1024 \
     --bf16 \
     --lora_r 16 --lora_alpha 32 --lora_init \
-    --batch_size 1 \
+    --batch_size 2 \
     --greedy True \
     --num_latent 3 \
     --use_prj True \

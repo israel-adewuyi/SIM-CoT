@@ -122,6 +122,7 @@ class TrainingArguments(transformers.TrainingArguments):
     ref_loss_factor: float = field(default=1.0, metadata={"help": "A multiplier of the distillation loss."})
     inf_latent_iterations: int = field(default=1, metadata={"help": ""})
     inf_num_iterations: int = field(default=5, metadata={"help": "Run multiple times during inference"})
+    max_new_tokens: int = field(default=256, metadata={"help": "Maximum number of new tokens to generate during evaluation."})
     remove_eos: bool = field(default=False, metadata={"help": "Do not add <eos> as a delimiter to split QA."})
     print_ref_model_stats: bool = field(default=False, metadata={"help": "Print some stats for the teacher task."})
     include_last_cot: bool = field(default=False, metadata={"help": "Include the last CoT step in the training data."})
