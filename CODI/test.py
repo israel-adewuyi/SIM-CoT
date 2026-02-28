@@ -274,7 +274,7 @@ def evaluation(model_args, data_args, training_args, iteration_idx: int = 0):
 
     model.eval()
     gen_kwargs = {
-        "max_new_tokens": 256,
+        "max_new_tokens": training_args.max_new_tokens,
         "temperature":0.1,
         "top_k": 40,
         "top_p": 0.95,

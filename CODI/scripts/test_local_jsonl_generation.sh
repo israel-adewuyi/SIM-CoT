@@ -12,6 +12,7 @@ python test.py \
     --model_name_or_path meta-llama/Llama-3.2-1B-Instruct \
     --seed 11 \
     --model_max_length 512 \
+    --max_new_tokens 256 \
     --bf16 \
     --lora_r 128 --lora_alpha 32 --lora_init \
     --batch_size 64 \
