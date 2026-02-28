@@ -29,7 +29,7 @@ python train.py \
     --warmup_ratio 0.03 \
     --lr_scheduler_type "cosine" \
     --do_train \
-    --report_to tensorboard \
+    --report_to none \
     --num_latent 6 \
     --logging_strategy "steps" \
     --logging_steps 1 \
