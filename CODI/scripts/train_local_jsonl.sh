@@ -2,11 +2,9 @@
 set -euo pipefail
 
 DATA_PATH=/home/user/israel/SIM-CoT/CODI/data/v2_train.jsonl
-EXPT_NAME=demo_runs
 RUN_NAME=testing_add_decoder_and_num_latents
 
 python train.py \
-    --expt_name "$EXPT_NAME" \
     --run_name "$RUN_NAME" \
     --model_name_or_path Qwen/Qwen3-4B \
     --data_name local-jsonl \
