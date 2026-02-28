@@ -4,6 +4,7 @@ import logging
 import os
 import re
 import random
+from datetime import datetime
 from dataclasses import dataclass, field
 from typing import Dict, Optional, Sequence
 import torch
@@ -62,6 +63,49 @@ def read_jsonl(file_path):
             except json.JSONDecodeError as e:
                 raise ValueError(f"Invalid JSON in {file_path} at line {line_no}: {e}") from e
     return data
+
+def _sanitize_path_component(value: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "-", value.strip())
+    cleaned = cleaned.strip("-._")
+    return cleaned or "default"
+
+def prepare_run_layout(model_args: ModelArguments, _data_args: DataArguments, training_args: TrainingArguments) -> Dict[str, str]:
+    expt_name = _sanitize_path_component(training_args.expt_name or "default")
+    model_tag = _sanitize_path_component(model_args.model_name_or_path.split("/")[-1])
+    configured_run_name = getattr(training_args, "run_name", None)
+    if configured_run_name:
+        run_name = _sanitize_path_component(str(configured_run_name))
+    else:
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        run_name = _sanitize_path_component(f"{timestamp}_seed{training_args.seed}_{model_tag}")
+
+    run_root = os.path.join("runs", expt_name, run_name)
+    run_paths = {
+        "run_root": run_root,
+        "checkpoints": os.path.join(run_root, "checkpoints"),
+        "tb": os.path.join(run_root, "tb"),
+        "config": os.path.join(run_root, "config"),
+        "run_config": os.path.join(run_root, "config", "run_config.json"),
+    }
+    for path in run_paths.values():
+        if path.endswith(".json"):
+            continue
+        os.makedirs(path, exist_ok=True)
+
+    training_args.expt_name = expt_name
+    training_args.run_name = run_name
+    training_args.output_dir = run_paths["checkpoints"]
+    training_args.logging_dir = run_paths["tb"]
+    return run_paths
+
+def save_args_config(config_path: str, model_args: ModelArguments, data_args: DataArguments, training_args: TrainingArguments) -> None:
+    payload = {
+        "model_args": vars(model_args),
+        "data_args": vars(data_args),
+        "training_args": training_args.to_dict(),
+    }
+    with open(config_path, "w", encoding="utf-8") as file:
+        json.dump(payload, file, indent=2, sort_keys=True, default=str)
 
 IGNORE_INDEX = -100
 
@@ -160,6 +204,11 @@ def extract_answer_number(sentence: str) -> float:
 def train():
     parser = transformers.HfArgumentParser((ModelArguments, DataArguments, TrainingArguments))
     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
+    run_paths = prepare_run_layout(model_args, data_args, training_args)
+    save_args_config(run_paths["run_config"], model_args, data_args, training_args)
+    logging.warning(f"Run root: {run_paths['run_root']}")
+    logging.warning(f"Checkpoints: {run_paths['checkpoints']}")
+    logging.warning(f"TensorBoard: {run_paths['tb']}")
 
     ##########################
     #       Peft Model       #
@@ -476,15 +525,6 @@ def train():
             return dict(train_dataset=train_dataset, eval_dataset=None, data_collator=data_collator)
         else:
             raise NotImplementedError(f"Dataset {data_args.data_name} is not supported.")
-
-    training_args.output_dir = os.path.join(
-        training_args.output_dir,
-        training_args.expt_name,
-        model_args.model_name_or_path.split('/')[-1],
-        f"ep_{int(training_args.num_train_epochs)}",
-        f"lr_{training_args.learning_rate}",
-        f"seed_{training_args.seed}",
-    )
 
     data_module = make_supervised_data_module(tokenizer=tokenizer, data_args=data_args)
     trainer = CustomTrainer(model=model, tokenizer=tokenizer, args=training_args, **data_module)

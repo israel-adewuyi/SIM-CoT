@@ -1,16 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SAVE_DIR=~/codi_ckpt/local_jsonl
 DATA_PATH=/absolute/path/to/your/train.jsonl
-
-mkdir -p "$SAVE_DIR"
-cp scripts/train_local_jsonl.sh "$SAVE_DIR"
+EXPT_NAME=local_jsonl_train
+RUN_NAME=local_jsonl_seed11
 
 python train.py \
-    --output_dir "$SAVE_DIR" \
-    --expt_name local_jsonl_train \
-    --logging_dir "$SAVE_DIR/logs" \
+    --expt_name "$EXPT_NAME" \
+    --run_name "$RUN_NAME" \
     --logging_steps 10 \
     --model_name_or_path meta-llama/Llama-3.2-1B-Instruct \
     --data_name local-jsonl \
@@ -25,7 +22,7 @@ python train.py \
     --max_grad_norm 2.0 \
     --use_lora True \
     --lora_r 128 --lora_alpha 32 --lora_init \
-    --save_strategy "no" \
+    --save_strategy "epoch" \
     --save_total_limit 1 \
     --save_safetensors False \
     --weight_decay 0.1 \
