@@ -157,8 +157,11 @@ def compute_cosine(ref_embs: torch.Tensor, pred_embs: torch.Tensor) -> torch.Ten
     return (ref_embs * pred_embs).sum(dim=1)
 
 
-def validate_bash_blocks(predictions: List[str]) -> List[int]:
-    return [1 if BASH_BLOCK_PATTERN.search(text) else 0 for text in predictions]
+def extract_filtered_text(generated_text: str) -> Tuple[str, int]:
+    match = BASH_BLOCK_PATTERN.search(generated_text)
+    if match is None:
+        return generated_text, 0
+    return match.group(0).strip(), 1
 
 
 def score_rows(
@@ -178,6 +181,7 @@ def score_rows(
         question = normalize_text(row["question"])
         reference_text = normalize_text(row["answer"])
         generated_text = normalize_text(row["prediction"])
+        filtered_text, is_valid_bash = extract_filtered_text(generated_text)
 
         aux_scores: Dict[str, float] = {}
         aux_errors: Dict[str, str] = {}
@@ -187,6 +191,7 @@ def score_rows(
             "question": question,
             "reference_text": reference_text,
             "generated_text": generated_text,
+            "filtered_text": filtered_text,
             "prompt_tokens": len(tokenizer.encode(question, add_special_tokens=False)),
             "reference_tokens": len(tokenizer.encode(reference_text, add_special_tokens=False)),
             "generated_tokens": len(tokenizer.encode(generated_text, add_special_tokens=False)),
@@ -215,7 +220,8 @@ def score_rows(
         else:
             scoring_indices.append(len(scored_rows))
             refs_for_scoring.append(reference_text)
-            preds_for_scoring.append(generated_text)
+            preds_for_scoring.append(filtered_text)
+            output_row["is_valid_bash"] = int(is_valid_bash)
 
         scored_rows.append(output_row)
 
@@ -237,7 +243,10 @@ def score_rows(
             device=cfg["device"],
         )
         raw_similarities = compute_cosine(ref_embs, pred_embs).tolist()
-        is_valid_bash_list = validate_bash_blocks(preds_for_scoring)
+        is_valid_bash_list = [
+            int(scored_rows[row_out_idx]["is_valid_bash"])
+            for row_out_idx in scoring_indices
+        ]
         similarities = [
             float(raw_similarities[i]) if is_valid_bash_list[i] == 1 else 0.0
             for i in range(len(raw_similarities))
