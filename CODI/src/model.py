@@ -7,6 +7,7 @@ import torch.nn.functional as F
 import random
 from dataclasses import dataclass, field
 from typing import Optional
+import re
 from peft import (
     get_peft_model,
     PeftModel,
@@ -263,6 +264,83 @@ def dedup_trailing_pads(explain_embds_list, pad_id=128256):
 
     return [row[:max_len] for row in explain_embds_list]
 
+
+def _normalise_step_count(steps: List[str], target_steps: int) -> List[str]:
+    if target_steps <= 0:
+        return []
+    if len(steps) > target_steps:
+        kept = steps[:target_steps - 1]
+        kept.append(" ".join(steps[target_steps - 1:]).strip())
+        return kept
+    if len(steps) < target_steps:
+        steps = list(steps) + [""] * (target_steps - len(steps))
+    return steps
+
+
+def get_qwen_sentence_steps(
+    ref_input_ids: Union[torch.Tensor, Sequence[Sequence[int]]],
+    ref_labels: Optional[Union[torch.Tensor, Sequence[Sequence[int]]]],
+    tokenizer,
+    latent_num: int,
+    eot_id: int,
+    pad_id: int,
+) -> List[List[List[int]]]:
+    if isinstance(ref_input_ids, torch.Tensor):
+        assert ref_input_ids.dim() == 2, "ref_input_ids should be 2D [B, T]"
+        input_rows = ref_input_ids.detach().cpu().tolist()
+    else:
+        input_rows = [list(x) for x in ref_input_ids]
+
+    if isinstance(ref_labels, torch.Tensor):
+        label_rows = ref_labels.detach().cpu().tolist()
+    else:
+        label_rows = ref_labels
+
+    eos_id = tokenizer.eos_token_id
+    vocab_size = len(tokenizer)
+    results: List[List[List[int]]] = []
+
+    for idx, ids in enumerate(input_rows):
+        if label_rows is not None:
+            labels = label_rows[idx]
+            target_ids = [tok for tok, lab in zip(ids, labels) if lab != -100]
+        else:
+            target_ids = list(ids)
+
+        clean_ids = []
+        for tok in target_ids:
+            if tok == pad_id or (eos_id is not None and tok == eos_id) or tok == eot_id:
+                continue
+            if 0 <= tok < vocab_size:
+                clean_ids.append(tok)
+
+        text = tokenizer.decode(clean_ids, skip_special_tokens=True).strip()
+        if text:
+            sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+|\n+", text) if s.strip()]
+            if not sentences:
+                sentences = [text]
+        else:
+            sentences = []
+
+        sentences = _normalise_step_count(sentences, latent_num)
+
+        step_tokens: List[List[int]] = []
+        for sentence in sentences:
+            if not sentence:
+                step_tokens.append([pad_id])
+                continue
+            tok_ids = tokenizer.encode(sentence, add_special_tokens=False)
+            if not tok_ids:
+                step_tokens.append([pad_id])
+                continue
+            step_tokens.append(tok_ids + [eot_id])
+
+        if not step_tokens:
+            step_tokens = [[pad_id] for _ in range(latent_num)]
+        results.append(step_tokens)
+
+    return results
+
 class LowRankProjector(nn.Module):
     def __init__(self, input_dim, output_dim, rank=64):
         super(LowRankProjector, self).__init__()
@@ -477,9 +555,19 @@ class CODI(torch.nn.Module):
                                        eot_id=self.tokenizer.eos_token_id, pad_id=self.tokenizer.pad_token_id, 
                                        stop_ids=(self.tokenizer.eos_token_id, self.tokenizer.pad_token_id))
                 steps_pad_list = pad_steps(steps_list, pad_id=self.tokenizer.pad_token_id)
+            elif 'qwen' in self.model_args.model_name_or_path.lower():
+                steps_list = get_qwen_sentence_steps(
+                    ref_input_ids=ref_input_ids,
+                    ref_labels=ref_labels,
+                    tokenizer=self.tokenizer,
+                    latent_num=self.num_latent + 1,
+                    eot_id=self.eot_id,
+                    pad_id=self.tokenizer.pad_token_id,
+                )
+                steps_pad_list = pad_steps(steps_list, pad_id=self.tokenizer.pad_token_id)
 
             else:
-                raise ValueError("no implementaion")
+                raise ValueError("decoder step extraction is not implemented for this model type")
         
         if self.use_prj:
             with autocast(dtype=torch.bfloat16, enabled=True):
