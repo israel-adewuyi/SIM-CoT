@@ -288,12 +288,22 @@ class CustomTrainer(Trainer):
         try:
             return super()._save(output_dir, state_dict)
         except RuntimeError as e:
-            if getattr(self.args, "save_safetensors", False) and "Some tensors share memory" in str(e):
+            if "Some tensors share memory" in str(e):
                 logging.warning(
-                    "safetensors save failed due to shared tensors; falling back to save_safetensors=False."
+                    "safetensors save failed due to shared tensors; falling back to pytorch_model.bin."
                 )
-                setattr(self.args, "save_safetensors", False)
-                return super()._save(output_dir, state_dict)
+                if output_dir is None:
+                    output_dir = self.args.output_dir
+                os.makedirs(output_dir, exist_ok=True)
+
+                if state_dict is None:
+                    state_dict = self.model.state_dict()
+                torch.save(state_dict, os.path.join(output_dir, "pytorch_model.bin"))
+
+                if self.tokenizer is not None:
+                    self.tokenizer.save_pretrained(output_dir)
+                torch.save(self.args, os.path.join(output_dir, "training_args.bin"))
+                return
             raise
 
 
