@@ -49,6 +49,20 @@ def read_json(file_path):
     except Exception as e:
         print(f"读取JSON文件时出错: {e}")
         return None
+
+def read_jsonl(file_path):
+    data = []
+    with open(file_path, "r", encoding="utf-8") as file:
+        for line_no, line in enumerate(file, start=1):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                data.append(json.loads(line))
+            except json.JSONDecodeError as e:
+                raise ValueError(f"Invalid JSON in {file_path} at line {line_no}: {e}") from e
+    return data
+
 IGNORE_INDEX = -100
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -267,13 +281,36 @@ def train():
 
             token_nums = []
             # import pdb; pdb.set_trace()
-            raw_data = read_json('/mnt/shared-storage-user/weixilin/MLLM/coconut/data/gsm_train_clean.json')            
+            if raw_data is None:
+                raise ValueError(f"No dataset loaded for data_name={self.data_name}.")
+
             for num_iter, example in tqdm(enumerate(raw_data)):
-                if 'cot' not in example: 
-                    example['cot'] = example['steps']
-                    example['cot'] = ' '.join(example['cot'])
                 if training_args.exp_mode and num_iter > training_args.exp_data_num:
                     break
+
+                if self.data_name == "local-jsonl":
+                    required_keys = ("question", "cot", "answer")
+                    missing_keys = [k for k in required_keys if k not in example]
+                    if missing_keys:
+                        raise ValueError(
+                            f"local-jsonl sample at index {num_iter} is missing required keys: {missing_keys}"
+                        )
+
+                    question = str(example["question"]).strip() + "\n"
+                    cot = str(example["cot"]).strip() + "\n"
+                    answer = f"The answer is: {str(example['answer']).strip()}"
+
+                    token_num = len(tokenizer.encode(question + " " + cot + " " + answer))
+                    if token_num > training_args.max_token_num:
+                        continue
+                    questions.append(question)
+                    cots.append(cot)
+                    answers.append(answer)
+                    continue
+
+                if 'cot' not in example:
+                    example['cot'] = example['steps']
+                    example['cot'] = ' '.join(example['cot'])
                 question = f"{example['question']}"
                 if "icot" in self.data_name and "full" in self.data_name: # icot-full (GSM8k-Aug-NL)
                     # bad data
@@ -397,9 +434,27 @@ def train():
     def make_supervised_data_module(tokenizer, data_args) -> Dict:
         """Make dataset and collator for supervised fine-tuning."""
         logging.warning("Downloading Data")
-        if "icot" in data_args.data_name:
+        if data_args.data_name == "local-jsonl":
+            if not data_args.data_path:
+                raise ValueError("--data_path is required when --data_name local-jsonl is used.")
+            if not data_args.data_path.endswith(".jsonl"):
+                raise ValueError(f"--data_path must point to a .jsonl file, got: {data_args.data_path}")
+            if not os.path.isfile(data_args.data_path):
+                raise ValueError(f"JSONL file does not exist: {data_args.data_path}")
+            dataset = read_jsonl(data_args.data_path)
+            train_dataset = SupervisedDataset(data_name=data_args.data_name, raw_data=dataset, tokenizer=tokenizer, bot=model.bot_id, eot=model.eot_id)
+            data_collator = DataCollatorForSupervisedDataset(tokenizer=tokenizer)
+            return dict(train_dataset=train_dataset, eval_dataset=None, data_collator=data_collator)
+        elif "icot" in data_args.data_name:
             # dataset = load_dataset("zen-E/GSM8k-Aug")["train"]
-            dataset = None
+            default_icot_path = "/mnt/shared-storage-user/weixilin/MLLM/coconut/data/gsm_train_clean.json"
+            dataset_path = data_args.data_path if data_args.data_path else default_icot_path
+            if dataset_path.endswith(".jsonl"):
+                dataset = read_jsonl(dataset_path)
+            else:
+                dataset = read_json(dataset_path)
+            if dataset is None:
+                raise ValueError(f"Failed to load dataset from: {dataset_path}")
             train_dataset = SupervisedDataset(data_name=data_args.data_name, raw_data=dataset, tokenizer=tokenizer, bot=model.bot_id, eot=model.eot_id)
             data_collator = DataCollatorForSupervisedDataset(tokenizer=tokenizer)
             return dict(train_dataset=train_dataset, eval_dataset=None, data_collator=data_collator)

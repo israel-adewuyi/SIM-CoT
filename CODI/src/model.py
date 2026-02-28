@@ -66,6 +66,10 @@ class DataArguments:
     data_name: str = field(
         default=None, metadata={"help": "Path to the training data."}
     )
+    data_path: Optional[str] = field(
+        default=None,
+        metadata={"help": "Local JSONL file path for data_name=local-jsonl."},
+    )
     debug_data: bool = field(
         default=False,
         metadata={
@@ -762,4 +766,3 @@ class CODI(torch.nn.Module):
             return {"loss": loss, "logits": logits, "ce_loss": ce_loss_total, "distill_loss": distill_loss_total, "ref_ce_loss": ref_ce_loss, 'explain_loss': explain_loss_total}
         else:
             return {"loss": loss, "logits": logits, "ce_loss": ce_loss_total, "distill_loss": distill_loss_total, "ref_ce_loss": ref_ce_loss}
-
