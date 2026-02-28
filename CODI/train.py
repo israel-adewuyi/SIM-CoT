@@ -284,6 +284,18 @@ class CustomTrainer(Trainer):
         except TypeError:
             super().log(grouped_logs)
 
+    def _save(self, output_dir: Optional[str] = None, state_dict=None):
+        try:
+            return super()._save(output_dir, state_dict)
+        except RuntimeError as e:
+            if self.args.save_safetensors and "Some tensors share memory" in str(e):
+                logging.warning(
+                    "safetensors save failed due to shared tensors; falling back to save_safetensors=False."
+                )
+                self.args.save_safetensors = False
+                return super()._save(output_dir, state_dict)
+            raise
+
 
 class RawTensorBoardCallback(TrainerCallback):
     """Write tags to TensorBoard as-is (no train/eval prefix rewrite)."""
