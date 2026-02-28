@@ -4,6 +4,7 @@
 import argparse
 import json
 import logging
+import re
 import statistics
 from datetime import datetime, timezone
 from pathlib import Path
@@ -15,6 +16,7 @@ from transformers import AutoModel, AutoTokenizer
 
 DEFAULT_SCORING_MODEL = "Qwen/Qwen3-Embedding-0.6B"
 REQUIRED_FIELDS = ("index", "question", "answer", "prediction")
+BASH_BLOCK_PATTERN = re.compile(r"```bash\b[^\n\r]*\r?\n([\s\S]*?)```")
 
 # Extension hook: register future auxiliary scorers here.
 # Signature: scorer(generated_text: str, reference_text: str) -> float
@@ -155,6 +157,10 @@ def compute_cosine(ref_embs: torch.Tensor, pred_embs: torch.Tensor) -> torch.Ten
     return (ref_embs * pred_embs).sum(dim=1)
 
 
+def validate_bash_blocks(predictions: List[str]) -> List[int]:
+    return [1 if BASH_BLOCK_PATTERN.search(text) else 0 for text in predictions]
+
+
 def score_rows(
     rows: List[Dict[str, Any]],
     tokenizer: Any,
@@ -184,6 +190,8 @@ def score_rows(
             "prompt_tokens": len(tokenizer.encode(question, add_special_tokens=False)),
             "reference_tokens": len(tokenizer.encode(reference_text, add_special_tokens=False)),
             "generated_tokens": len(tokenizer.encode(generated_text, add_special_tokens=False)),
+            "raw_similarity": None,
+            "is_valid_bash": None,
             "similarity": None,
             "error": None,
             "scoring_model": cfg["scoring_model"],
@@ -228,10 +236,17 @@ def score_rows(
             max_length=cfg["scoring_max_length"],
             device=cfg["device"],
         )
-        similarities = compute_cosine(ref_embs, pred_embs).tolist()
-        for local_idx, sim in enumerate(similarities):
+        raw_similarities = compute_cosine(ref_embs, pred_embs).tolist()
+        is_valid_bash_list = validate_bash_blocks(preds_for_scoring)
+        similarities = [
+            float(raw_similarities[i]) if is_valid_bash_list[i] == 1 else 0.0
+            for i in range(len(raw_similarities))
+        ]
+        for local_idx in range(len(similarities)):
             row_out_idx = scoring_indices[local_idx]
-            scored_rows[row_out_idx]["similarity"] = float(sim)
+            scored_rows[row_out_idx]["raw_similarity"] = float(raw_similarities[local_idx])
+            scored_rows[row_out_idx]["is_valid_bash"] = int(is_valid_bash_list[local_idx])
+            scored_rows[row_out_idx]["similarity"] = float(similarities[local_idx])
 
     return scored_rows
 
@@ -264,6 +279,23 @@ def compute_summary(
         "output_dir": paths["output_dir"],
         "scored_at": datetime.now(timezone.utc).isoformat(),
     }
+    raw_similarities = [
+        float(row["raw_similarity"])
+        for row in scored_rows
+        if row.get("raw_similarity") is not None
+    ]
+    valid_bash_flags = [
+        int(row["is_valid_bash"])
+        for row in scored_rows
+        if row.get("is_valid_bash") is not None
+    ]
+    summary["raw_similarity_mean"] = float(statistics.mean(raw_similarities)) if raw_similarities else None
+    summary["raw_similarity_median"] = float(statistics.median(raw_similarities)) if raw_similarities else None
+    summary["raw_similarity_min"] = float(min(raw_similarities)) if raw_similarities else None
+    summary["raw_similarity_max"] = float(max(raw_similarities)) if raw_similarities else None
+    summary["raw_similarity_std"] = float(statistics.pstdev(raw_similarities)) if raw_similarities else None
+    summary["rows_valid_bash"] = int(sum(valid_bash_flags)) if valid_bash_flags else 0
+    summary["rows_invalid_bash"] = int(len(valid_bash_flags) - sum(valid_bash_flags)) if valid_bash_flags else 0
     return summary
 
 
