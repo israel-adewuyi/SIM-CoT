@@ -2,11 +2,10 @@
 set -euo pipefail
 
 DATA_PATH=/home/user/israel/SIM-CoT/CODI/data/v2_train.jsonl
-EXPT_NAME=qwen_4B
-RUN_NAME=lora-16_nlatent-3_lr-8e4
+RUN_NAME=qwen4B_lora-16_nlatent-3_lr-8e4
+
 
 python train.py \
-    --expt_name "$EXPT_NAME" \
     --run_name "$RUN_NAME" \
     --model_name_or_path Qwen/Qwen3-4B \
     --data_name local-jsonl \

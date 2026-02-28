@@ -6,7 +6,6 @@ mkdir -p "$SAVE_DIR"
 
 python train.py \
 	--output_dir "$SAVE_DIR" \
-  	--expt_name gsm8k_llama8b_latent_baseline-decoder-2-9_8 \
 	--logging_dir "$SAVE_DIR/logs"\
 	--logging_steps 10 \
 	--model_name_or_path /mnt/shared-storage-user/mllm/shared/mllm_ckpts/models--meta-llama--Llama-3.1-8B-Instruct/snapshots/0e9e39f249a16976918f6564b8830bc894c89659 \

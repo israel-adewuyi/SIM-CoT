@@ -6,7 +6,6 @@ mkdir -p "$SAVE_DIR"
 # /fs-computility/mllm/shared/weixilin/coconut/ckpts/gsm_cot/gsm-cot/checkpoint_13
 python train.py \
 	--output_dir "$SAVE_DIR" \
-  	--expt_name gsm8k_gpt_latent_decoder-2 \
 	--logging_dir "$SAVE_DIR/logs"\
 	--logging_steps 10 \
 	--model_name_or_path /mnt/shared-storage-user/mllm/shared/weixilin/gpt2 \
