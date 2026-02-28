@@ -13,6 +13,9 @@ import json
 import transformers
 from torch.utils.data import Dataset
 from transformers import Trainer
+from transformers import TrainerCallback
+from transformers.integrations import TensorBoardCallback
+from torch.utils.tensorboard import SummaryWriter
 from safetensors.torch import load_file
 from tqdm import tqdm
 from math import ceil
@@ -280,6 +283,35 @@ class CustomTrainer(Trainer):
             super().log(grouped_logs, start_time=start_time)
         except TypeError:
             super().log(grouped_logs)
+
+
+class RawTensorBoardCallback(TrainerCallback):
+    """Write tags to TensorBoard as-is (no train/eval prefix rewrite)."""
+
+    def __init__(self, log_dir: str):
+        self.log_dir = log_dir
+        self.writer = None
+
+    def on_train_begin(self, args, state, control, **kwargs):
+        self.writer = SummaryWriter(log_dir=self.log_dir)
+        return control
+
+    def on_log(self, args, state, control, logs=None, **kwargs):
+        if self.writer is None or logs is None:
+            return control
+        step = int(state.global_step)
+        for key, value in logs.items():
+            if isinstance(value, (int, float)):
+                self.writer.add_scalar(key, float(value), step)
+        self.writer.flush()
+        return control
+
+    def on_train_end(self, args, state, control, **kwargs):
+        if self.writer is not None:
+            self.writer.flush()
+            self.writer.close()
+            self.writer = None
+        return control
 
 def _tokenize_fn(strings: Sequence[str], tokenizer: transformers.PreTrainedTokenizer) -> Dict:
     """Tokenize a list of strings."""
@@ -657,6 +689,9 @@ def train():
     data_module = make_supervised_data_module(tokenizer=tokenizer, data_args=data_args)
     trainer = CustomTrainer(model=model, args=training_args, **data_module)
     trainer.tokenizer = tokenizer
+    trainer.remove_callback(TensorBoardCallback)
+    trainer.add_callback(RawTensorBoardCallback(training_args.logging_dir))
+    logging.warning(f"TensorBoard callback: raw tags to {training_args.logging_dir}")
     trainer.train()
 
     # to avoid the error of saving the model
