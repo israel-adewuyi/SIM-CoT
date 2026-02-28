@@ -122,6 +122,17 @@ def resolve_device() -> torch.device:
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
+def last_token_pool(last_hidden_states: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
+    left_padding = (attention_mask[:, -1].sum() == attention_mask.shape[0])
+    if left_padding:
+        return last_hidden_states[:, -1]
+    sequence_lengths = attention_mask.sum(dim=1) - 1
+    batch_size = last_hidden_states.shape[0]
+    return last_hidden_states[
+        torch.arange(batch_size, device=last_hidden_states.device), sequence_lengths
+    ]
+
+
 def encode_texts(
     texts: List[str],
     tokenizer: Any,
@@ -144,7 +155,7 @@ def encode_texts(
         with torch.no_grad():
             outputs = model(**encoded)
             hidden = outputs.last_hidden_state if hasattr(outputs, "last_hidden_state") else outputs[0]
-            pooled = hidden[:, 0, :]  # fixed CLS pooling
+            pooled = last_token_pool(hidden, encoded["attention_mask"])
             pooled = F.normalize(pooled.float(), p=2, dim=1)  # fixed normalization
             embeddings.append(pooled.cpu())
     if not embeddings:
@@ -334,7 +345,12 @@ def main() -> int:
 
     device = resolve_device()
     logging.info("Loading scoring model %s on %s", args.scoring_model, device)
-    tokenizer = AutoTokenizer.from_pretrained(args.scoring_model, trust_remote_code=True, use_fast=True)
+    tokenizer = AutoTokenizer.from_pretrained(
+        args.scoring_model,
+        trust_remote_code=True,
+        use_fast=True,
+        padding_side="left",
+    )
     model = AutoModel.from_pretrained(args.scoring_model, trust_remote_code=True)
     model = model.to(device)
     model.eval()
