@@ -4,6 +4,7 @@ import os
 from typing import Any, Dict, List
 
 import torch
+from tqdm.auto import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer, set_seed
 
 
@@ -151,6 +152,11 @@ def main() -> None:
     for iteration_idx in range(args.inf_num_iterations):
         set_seed(args.seed + iteration_idx)
         predictions: List[Dict[str, Any]] = []
+        progress = tqdm(
+            total=len(rows),
+            desc=f"Iteration {iteration_idx + 1}/{args.inf_num_iterations}",
+            unit="prompt",
+        )
 
         for start in range(0, len(rows), args.batch_size):
             batch_rows = rows[start : start + args.batch_size]
@@ -198,6 +204,9 @@ def main() -> None:
                         "prediction": prediction,
                     }
                 )
+            progress.update(len(batch_rows))
+
+        progress.close()
 
         output_file = os.path.join(
             args.output_dir,
