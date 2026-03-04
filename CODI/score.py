@@ -55,6 +55,11 @@ def parse_args() -> argparse.Namespace:
         help="Optional output directory. Default: <predictions_parent>/scores/<predictions_stem>/",
     )
     parser.add_argument(
+        "--scored_rows_path",
+        default="scored_rows.jsonl",
+        help="Relative path for scored rows JSONL under output_dir (default: scored_rows.jsonl).",
+    )
+    parser.add_argument(
         "--log_level",
         default="INFO",
         choices=("DEBUG", "INFO", "WARNING", "ERROR"),
@@ -363,6 +368,11 @@ def main() -> int:
         raise ValueError("--batch_size must be > 0.")
     if args.scoring_max_length <= 0:
         raise ValueError("--scoring_max_length must be > 0.")
+    if not args.scored_rows_path or not args.scored_rows_path.strip():
+        raise ValueError("--scored_rows_path must be a non-empty relative path.")
+    scored_rows_relpath = Path(args.scored_rows_path.strip())
+    if scored_rows_relpath.is_absolute():
+        raise ValueError("--scored_rows_path must be relative to --output_dir.")
 
     predictions_path = Path(args.predictions)
     if not predictions_path.is_file():
@@ -403,7 +413,7 @@ def main() -> int:
         },
     )
 
-    scored_rows_path = output_dir / "scored_rows.jsonl"
+    scored_rows_path = output_dir / scored_rows_relpath
     summary_path = output_dir / "summary.json"
     write_jsonl(scored_rows_path, scored_rows)
     write_json(summary_path, summary)
