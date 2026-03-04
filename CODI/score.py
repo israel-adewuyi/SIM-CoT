@@ -5,11 +5,13 @@ import argparse
 import json
 import logging
 import re
+import shlex
 import statistics
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
+from nltk.translate.bleu_score import SmoothingFunction, sentence_bleu
 import torch
 import torch.nn.functional as F
 from transformers import AutoModel, AutoTokenizer
@@ -17,10 +19,8 @@ from transformers import AutoModel, AutoTokenizer
 DEFAULT_SCORING_MODEL = "Qwen/Qwen3-Embedding-0.6B"
 REQUIRED_FIELDS = ("index", "question", "answer", "prediction")
 BASH_BLOCK_PATTERN = re.compile(r"```bash\b[^\n\r]*\r?\n([\s\S]*?)```")
-
-# Extension hook: register future auxiliary scorers here.
-# Signature: scorer(generated_text: str, reference_text: str) -> float
-AUX_SCORERS: Dict[str, Callable[[str, str], float]] = {}
+CODE_BLOCK_PATTERN = re.compile(r"```[a-zA-Z0-9_+-]*\r?\n(.*?)```", re.S)
+BLEU_SMOOTHING_FN = SmoothingFunction().method1
 
 
 def parse_args() -> argparse.Namespace:
@@ -175,6 +175,44 @@ def extract_filtered_text(generated_text: str) -> Tuple[str, int]:
     return match.group(0).strip(), 1
 
 
+def extract_code(text: str) -> str:
+    match = CODE_BLOCK_PATTERN.search(text or "")
+    if match is None:
+        return (text or "").strip()
+    return match.group(1).strip()
+
+
+def tokenize_bash(text: str) -> List[str]:
+    code = extract_code(text)
+    if not code:
+        return []
+    try:
+        return shlex.split(code, posix=True)
+    except ValueError:
+        return code.split()
+
+
+def compute_bleu_score(
+    candidate_tokens: List[str], reference_tokens: List[str], ngram_order: int
+) -> float:
+    if not candidate_tokens or not reference_tokens:
+        return 0.0
+    if ngram_order == 2:
+        weights = (0.5, 0.5, 0.0, 0.0)
+    elif ngram_order == 3:
+        weights = (1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0, 0.0)
+    else:
+        raise ValueError(f"Unsupported BLEU order: {ngram_order}")
+    return float(
+        sentence_bleu(
+            [reference_tokens],
+            candidate_tokens,
+            weights=weights,
+            smoothing_function=BLEU_SMOOTHING_FN,
+        )
+    )
+
+
 def score_rows(
     rows: List[Dict[str, Any]],
     tokenizer: Any,
@@ -193,9 +231,10 @@ def score_rows(
         reference_text = normalize_text(row["answer"])
         generated_text = normalize_text(row["prediction"])
         filtered_text, is_valid_bash = extract_filtered_text(generated_text)
-
-        aux_scores: Dict[str, float] = {}
-        aux_errors: Dict[str, str] = {}
+        reference_tokens = tokenize_bash(reference_text)
+        filtered_tokens = tokenize_bash(filtered_text)
+        bleu_2 = compute_bleu_score(filtered_tokens, reference_tokens, ngram_order=2)
+        bleu_3 = compute_bleu_score(filtered_tokens, reference_tokens, ngram_order=3)
 
         output_row: Dict[str, Any] = {
             "index": row["index"],
@@ -209,20 +248,13 @@ def score_rows(
             "raw_similarity": None,
             "is_valid_bash": None,
             "similarity": None,
+            "bleu_2": float(bleu_2),
+            "bleu_3": float(bleu_3),
             "error": None,
             "scoring_model": cfg["scoring_model"],
             "scoring_max_length": cfg["scoring_max_length"],
             "scored_at": scored_at,
-            "aux_scores": aux_scores,
-            "aux_errors": aux_errors,
         }
-
-        # Extension-ready scaffold for future auxiliary metrics.
-        for metric_name, scorer in AUX_SCORERS.items():
-            try:
-                aux_scores[metric_name] = float(scorer(generated_text, reference_text))
-            except Exception as exc:  # noqa: BLE001
-                aux_errors[metric_name] = str(exc)
 
         if not reference_text:
             output_row["error"] = "empty_reference"
