@@ -5,7 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CODI_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 DATA_PATH=/home/user/israel/SIM-CoT/CODI/data/v2_eval.jsonl
-OUTPUT_DIR=/home/user/israel/SIM-CoT/CODI/runs/qwen_4B_vanilla/eval
+OUTPUT_DIR=/home/user/israel/SIM-CoT/CODI/runs/qwen_4B_vanilla/
 
 python "$CODI_DIR/test_vanilla.py" \
     --data_name "local-jsonl" \
@@ -14,7 +14,7 @@ python "$CODI_DIR/test_vanilla.py" \
     --model_name_or_path Qwen/Qwen3-4B \
     --seed 11 \
     --model_max_length 16384 \
-    --max_new_tokens 1024 \
+    --max_new_tokens 4096 \
     --bf16 \
     --batch_size 2 \
     --greedy True \

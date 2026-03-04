@@ -2,8 +2,8 @@
 set -euo pipefail
 
 DATA_PATH=/home/user/israel/SIM-CoT/CODI/data/v2_eval.jsonl
-CKPT_DIR=/home/user/israel/SIM-CoT/CODI/runs/qwen_4B/lora-16_nlatent-3_lr-8e4/checkpoints
-OUTPUT_DIR=/home/user/israel/SIM-CoT/CODI/runs/qwen_4B/lora-16_nlatent-3_lr-8e4/eval
+CKPT_DIR=/home/user/israel/SIM-CoT/CODI/runs/qwen4B_lora-16_nlatent-3_lr-8e4/checkpoints/checkpoint-124
+OUTPUT_DIR=/home/user/israel/SIM-CoT/CODI/runs/qwen4B_lora-16_nlatent-3_lr-8e4/eval_epoch1_t08
 
 python test.py \
     --data_name "local-jsonl" \
@@ -16,7 +16,7 @@ python test.py \
     --bf16 \
     --lora_r 16 --lora_alpha 32 --lora_init \
     --batch_size 2 \
-    --greedy True \
+    --greedy False \
     --num_latent 3 \
     --use_prj True \
     --prj_dim 2048 \
