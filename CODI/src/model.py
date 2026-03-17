@@ -71,6 +71,10 @@ class DataArguments:
         default=None,
         metadata={"help": "Local JSONL file path for data_name=local-jsonl."},
     )
+    hf_dataset_name: Optional[str] = field(
+        default=None,
+        metadata={"help": "Hugging Face dataset repo id for data_name=hf."},
+    )
     debug_data: bool = field(
         default=False,
         metadata={

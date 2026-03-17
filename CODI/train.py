@@ -519,12 +519,12 @@ def train():
                 if training_args.exp_mode and num_iter > training_args.exp_data_num:
                     break
 
-                if self.data_name == "local-jsonl":
+                if self.data_name in {"local-jsonl", "hf"}:
                     required_keys = ("question", "cot", "answer")
                     missing_keys = [k for k in required_keys if k not in example]
                     if missing_keys:
                         raise ValueError(
-                            f"local-jsonl sample at index {num_iter} is missing required keys: {missing_keys}"
+                            f"{self.data_name} sample at index {num_iter} is missing required keys: {missing_keys}"
                         )
 
                     question = str(example["question"]).strip() + "\n"
@@ -674,6 +674,17 @@ def train():
                 raise ValueError(f"JSONL file does not exist: {data_args.data_path}")
             dataset = read_jsonl(data_args.data_path)
             train_dataset = SupervisedDataset(data_name=data_args.data_name, raw_data=dataset, tokenizer=tokenizer, bot=model.bot_id, eot=model.eot_id)
+            data_collator = DataCollatorForSupervisedDataset(tokenizer=tokenizer)
+            return dict(train_dataset=train_dataset, eval_dataset=None, data_collator=data_collator)
+        elif data_args.data_name == "hf":
+            if not data_args.hf_dataset_name:
+                raise ValueError("--hf_dataset_name is required when --data_name hf is used.")
+            dataset = load_dataset(data_args.hf_dataset_name)
+            if "train" not in dataset:
+                raise ValueError(
+                    f"Hugging Face dataset '{data_args.hf_dataset_name}' does not contain a 'train' split."
+                )
+            train_dataset = SupervisedDataset(data_name=data_args.data_name, raw_data=dataset["train"], tokenizer=tokenizer, bot=model.bot_id, eot=model.eot_id)
             data_collator = DataCollatorForSupervisedDataset(tokenizer=tokenizer)
             return dict(train_dataset=train_dataset, eval_dataset=None, data_collator=data_collator)
         elif "icot" in data_args.data_name:

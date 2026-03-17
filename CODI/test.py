@@ -175,6 +175,15 @@ def evaluation(model_args, data_args, training_args, iteration_idx: int = 0):
         if not os.path.isfile(data_args.data_path):
             raise ValueError(f"JSONL file does not exist: {data_args.data_path}")
         test_set = read_jsonl(data_args.data_path)
+    elif data_args.data_name == "hf":
+        if not data_args.hf_dataset_name:
+            raise ValueError("--hf_dataset_name is required when --data_name hf is used.")
+        dataset = load_dataset(data_args.hf_dataset_name)
+        if "eval" not in dataset:
+            raise ValueError(
+                f"Hugging Face dataset '{data_args.hf_dataset_name}' does not contain an 'eval' split."
+            )
+        test_set = dataset["eval"]
     elif "gsm-hard" == data_args.data_name:
         # dataset = load_dataset("juyoung-trl/gsm-hard")
         # test_set = dataset['train']
