@@ -74,7 +74,6 @@ def _sanitize_path_component(value: str) -> str:
     return cleaned or "default"
 
 def prepare_run_layout(model_args: ModelArguments, _data_args: DataArguments, training_args: TrainingArguments) -> Dict[str, str]:
-    expt_name = _sanitize_path_component(training_args.expt_name or "default")
     model_tag = _sanitize_path_component(model_args.model_name_or_path.split("/")[-1])
     configured_run_name = getattr(training_args, "run_name", None)
     if configured_run_name:
@@ -83,7 +82,7 @@ def prepare_run_layout(model_args: ModelArguments, _data_args: DataArguments, tr
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         run_name = _sanitize_path_component(f"{timestamp}_seed{training_args.seed}_{model_tag}")
 
-    run_root = os.path.join("runs", expt_name, run_name)
+    run_root = os.path.join("runs", run_name)
     run_paths = {
         "run_root": run_root,
         "checkpoints": os.path.join(run_root, "checkpoints"),
@@ -96,7 +95,6 @@ def prepare_run_layout(model_args: ModelArguments, _data_args: DataArguments, tr
             continue
         os.makedirs(path, exist_ok=True)
 
-    training_args.expt_name = expt_name
     training_args.run_name = run_name
     training_args.output_dir = run_paths["checkpoints"]
     training_args.logging_dir = run_paths["tb"]

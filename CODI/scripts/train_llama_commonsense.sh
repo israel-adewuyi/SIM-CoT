@@ -6,7 +6,6 @@ cp scripts/train_llama_commonsense.sh "$SAVE_DIR"
 
 python train.py \
 	--output_dir "$SAVE_DIR" \
-  	--expt_name gsm8k_llama1b_latent_baseline \
 	--logging_dir "$SAVE_DIR/logs"\
 	--logging_steps 10 \
 	--model_name_or_path meta-llama/Llama-3.2-1B-Instruct \

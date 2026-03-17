@@ -4,21 +4,23 @@
 import argparse
 import json
 import logging
+import re
+import shlex
 import statistics
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
+from nltk.translate.bleu_score import SmoothingFunction, sentence_bleu
 import torch
 import torch.nn.functional as F
 from transformers import AutoModel, AutoTokenizer
 
 DEFAULT_SCORING_MODEL = "Qwen/Qwen3-Embedding-0.6B"
 REQUIRED_FIELDS = ("index", "question", "answer", "prediction")
-
-# Extension hook: register future auxiliary scorers here.
-# Signature: scorer(generated_text: str, reference_text: str) -> float
-AUX_SCORERS: Dict[str, Callable[[str, str], float]] = {}
+BASH_BLOCK_PATTERN = re.compile(r"```bash\b[^\n\r]*\r?\n([\s\S]*?)```")
+CODE_BLOCK_PATTERN = re.compile(r"```[a-zA-Z0-9_+-]*\r?\n(.*?)```", re.S)
+BLEU_SMOOTHING_FN = SmoothingFunction().method1
 
 
 def parse_args() -> argparse.Namespace:
@@ -51,6 +53,11 @@ def parse_args() -> argparse.Namespace:
         "--output_dir",
         default=None,
         help="Optional output directory. Default: <predictions_parent>/scores/<predictions_stem>/",
+    )
+    parser.add_argument(
+        "--scored_rows_path",
+        default="scored_rows.jsonl",
+        help="Relative path for scored rows JSONL under output_dir (default: scored_rows.jsonl).",
     )
     parser.add_argument(
         "--log_level",
@@ -120,6 +127,17 @@ def resolve_device() -> torch.device:
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
+def last_token_pool(last_hidden_states: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
+    left_padding = (attention_mask[:, -1].sum() == attention_mask.shape[0])
+    if left_padding:
+        return last_hidden_states[:, -1]
+    sequence_lengths = attention_mask.sum(dim=1) - 1
+    batch_size = last_hidden_states.shape[0]
+    return last_hidden_states[
+        torch.arange(batch_size, device=last_hidden_states.device), sequence_lengths
+    ]
+
+
 def encode_texts(
     texts: List[str],
     tokenizer: Any,
@@ -142,7 +160,7 @@ def encode_texts(
         with torch.no_grad():
             outputs = model(**encoded)
             hidden = outputs.last_hidden_state if hasattr(outputs, "last_hidden_state") else outputs[0]
-            pooled = hidden[:, 0, :]  # fixed CLS pooling
+            pooled = last_token_pool(hidden, encoded["attention_mask"])
             pooled = F.normalize(pooled.float(), p=2, dim=1)  # fixed normalization
             embeddings.append(pooled.cpu())
     if not embeddings:
@@ -153,6 +171,51 @@ def encode_texts(
 def compute_cosine(ref_embs: torch.Tensor, pred_embs: torch.Tensor) -> torch.Tensor:
     # Embeddings are already normalized; cosine becomes dot product.
     return (ref_embs * pred_embs).sum(dim=1)
+
+
+def extract_filtered_text(generated_text: str) -> Tuple[str, int]:
+    match = BASH_BLOCK_PATTERN.search(generated_text)
+    if match is None:
+        return generated_text, 0
+    return match.group(0).strip(), 1
+
+
+def extract_code(text: str) -> str:
+    match = CODE_BLOCK_PATTERN.search(text or "")
+    if match is None:
+        return (text or "").strip()
+    return match.group(1).strip()
+
+
+def tokenize_bash(text: str) -> List[str]:
+    code = extract_code(text)
+    if not code:
+        return []
+    try:
+        return shlex.split(code, posix=True)
+    except ValueError:
+        return code.split()
+
+
+def compute_bleu_score(
+    candidate_tokens: List[str], reference_tokens: List[str], ngram_order: int
+) -> float:
+    if not candidate_tokens or not reference_tokens:
+        return 0.0
+    if ngram_order == 2:
+        weights = (0.5, 0.5, 0.0, 0.0)
+    elif ngram_order == 3:
+        weights = (1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0, 0.0)
+    else:
+        raise ValueError(f"Unsupported BLEU order: {ngram_order}")
+    return float(
+        sentence_bleu(
+            [reference_tokens],
+            candidate_tokens,
+            weights=weights,
+            smoothing_function=BLEU_SMOOTHING_FN,
+        )
+    )
 
 
 def score_rows(
@@ -172,33 +235,31 @@ def score_rows(
         question = normalize_text(row["question"])
         reference_text = normalize_text(row["answer"])
         generated_text = normalize_text(row["prediction"])
-
-        aux_scores: Dict[str, float] = {}
-        aux_errors: Dict[str, str] = {}
+        filtered_text, is_valid_bash = extract_filtered_text(generated_text)
+        reference_tokens = tokenize_bash(reference_text)
+        filtered_tokens = tokenize_bash(filtered_text)
+        bleu_2 = compute_bleu_score(filtered_tokens, reference_tokens, ngram_order=2)
+        bleu_3 = compute_bleu_score(filtered_tokens, reference_tokens, ngram_order=3)
 
         output_row: Dict[str, Any] = {
             "index": row["index"],
             "question": question,
             "reference_text": reference_text,
             "generated_text": generated_text,
+            "filtered_text": filtered_text,
             "prompt_tokens": len(tokenizer.encode(question, add_special_tokens=False)),
             "reference_tokens": len(tokenizer.encode(reference_text, add_special_tokens=False)),
             "generated_tokens": len(tokenizer.encode(generated_text, add_special_tokens=False)),
+            "raw_similarity": None,
+            "is_valid_bash": None,
             "similarity": None,
+            "bleu_2": float(bleu_2),
+            "bleu_3": float(bleu_3),
             "error": None,
             "scoring_model": cfg["scoring_model"],
             "scoring_max_length": cfg["scoring_max_length"],
             "scored_at": scored_at,
-            "aux_scores": aux_scores,
-            "aux_errors": aux_errors,
         }
-
-        # Extension-ready scaffold for future auxiliary metrics.
-        for metric_name, scorer in AUX_SCORERS.items():
-            try:
-                aux_scores[metric_name] = float(scorer(generated_text, reference_text))
-            except Exception as exc:  # noqa: BLE001
-                aux_errors[metric_name] = str(exc)
 
         if not reference_text:
             output_row["error"] = "empty_reference"
@@ -207,7 +268,8 @@ def score_rows(
         else:
             scoring_indices.append(len(scored_rows))
             refs_for_scoring.append(reference_text)
-            preds_for_scoring.append(generated_text)
+            preds_for_scoring.append(filtered_text)
+            output_row["is_valid_bash"] = int(is_valid_bash)
 
         scored_rows.append(output_row)
 
@@ -228,10 +290,20 @@ def score_rows(
             max_length=cfg["scoring_max_length"],
             device=cfg["device"],
         )
-        similarities = compute_cosine(ref_embs, pred_embs).tolist()
-        for local_idx, sim in enumerate(similarities):
+        raw_similarities = compute_cosine(ref_embs, pred_embs).tolist()
+        is_valid_bash_list = [
+            int(scored_rows[row_out_idx]["is_valid_bash"])
+            for row_out_idx in scoring_indices
+        ]
+        similarities = [
+            float(raw_similarities[i]) if is_valid_bash_list[i] == 1 else 0.0
+            for i in range(len(raw_similarities))
+        ]
+        for local_idx in range(len(similarities)):
             row_out_idx = scoring_indices[local_idx]
-            scored_rows[row_out_idx]["similarity"] = float(sim)
+            scored_rows[row_out_idx]["raw_similarity"] = float(raw_similarities[local_idx])
+            scored_rows[row_out_idx]["is_valid_bash"] = int(is_valid_bash_list[local_idx])
+            scored_rows[row_out_idx]["similarity"] = float(similarities[local_idx])
 
     return scored_rows
 
@@ -264,6 +336,23 @@ def compute_summary(
         "output_dir": paths["output_dir"],
         "scored_at": datetime.now(timezone.utc).isoformat(),
     }
+    raw_similarities = [
+        float(row["raw_similarity"])
+        for row in scored_rows
+        if row.get("raw_similarity") is not None
+    ]
+    valid_bash_flags = [
+        int(row["is_valid_bash"])
+        for row in scored_rows
+        if row.get("is_valid_bash") is not None
+    ]
+    summary["raw_similarity_mean"] = float(statistics.mean(raw_similarities)) if raw_similarities else None
+    summary["raw_similarity_median"] = float(statistics.median(raw_similarities)) if raw_similarities else None
+    summary["raw_similarity_min"] = float(min(raw_similarities)) if raw_similarities else None
+    summary["raw_similarity_max"] = float(max(raw_similarities)) if raw_similarities else None
+    summary["raw_similarity_std"] = float(statistics.pstdev(raw_similarities)) if raw_similarities else None
+    summary["rows_valid_bash"] = int(sum(valid_bash_flags)) if valid_bash_flags else 0
+    summary["rows_invalid_bash"] = int(len(valid_bash_flags) - sum(valid_bash_flags)) if valid_bash_flags else 0
     return summary
 
 
@@ -279,6 +368,11 @@ def main() -> int:
         raise ValueError("--batch_size must be > 0.")
     if args.scoring_max_length <= 0:
         raise ValueError("--scoring_max_length must be > 0.")
+    if not args.scored_rows_path or not args.scored_rows_path.strip():
+        raise ValueError("--scored_rows_path must be a non-empty relative path.")
+    scored_rows_relpath = Path(args.scored_rows_path.strip())
+    if scored_rows_relpath.is_absolute():
+        raise ValueError("--scored_rows_path must be relative to --output_dir.")
 
     predictions_path = Path(args.predictions)
     if not predictions_path.is_file():
@@ -293,7 +387,12 @@ def main() -> int:
 
     device = resolve_device()
     logging.info("Loading scoring model %s on %s", args.scoring_model, device)
-    tokenizer = AutoTokenizer.from_pretrained(args.scoring_model, trust_remote_code=True, use_fast=True)
+    tokenizer = AutoTokenizer.from_pretrained(
+        args.scoring_model,
+        trust_remote_code=True,
+        use_fast=True,
+        padding_side="left",
+    )
     model = AutoModel.from_pretrained(args.scoring_model, trust_remote_code=True)
     model = model.to(device)
     model.eval()
@@ -314,7 +413,7 @@ def main() -> int:
         },
     )
 
-    scored_rows_path = output_dir / "scored_rows.jsonl"
+    scored_rows_path = output_dir / scored_rows_relpath
     summary_path = output_dir / "summary.json"
     write_jsonl(scored_rows_path, scored_rows)
     write_json(summary_path, summary)

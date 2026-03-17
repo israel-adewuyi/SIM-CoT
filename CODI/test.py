@@ -284,7 +284,7 @@ def evaluation(model_args, data_args, training_args, iteration_idx: int = 0):
     model.eval()
     gen_kwargs = {
         "max_new_tokens": training_args.max_new_tokens,
-        "temperature":0.1,
+        "temperature":0.8,
         "top_k": 40,
         "top_p": 0.95,
         "do_sample": True,
@@ -448,7 +448,7 @@ def evaluation(model_args, data_args, training_args, iteration_idx: int = 0):
                     ans_pred_list.append(extract_answer_number(decoded_pred))
     if generation_only:
         output_root = training_args.output_dir if training_args.output_dir else "eval_outputs"
-        output_file = os.path.join(output_root, "predictions", f"{data_args.data_name}_iter_{iteration_idx}.jsonl")
+        output_file = os.path.join(output_root, f"eval_res.jsonl")
         write_jsonl(generation_records, output_file)
         print(f"Saved {len(generation_records)} generations to {output_file}")
         return {"mode": "generation_only", "output_file": output_file, "num_samples": len(generation_records)}
