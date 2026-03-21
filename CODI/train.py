@@ -7,7 +7,7 @@ import random
 import time
 from datetime import datetime
 from dataclasses import dataclass, field
-from typing import Dict, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 import torch
 import json
 import transformers
@@ -110,6 +110,10 @@ def save_args_config(config_path: str, model_args: ModelArguments, data_args: Da
         json.dump(payload, file, indent=2, sort_keys=True, default=str)
 
 IGNORE_INDEX = -100
+PREPROCESS_CACHE_VERSION = 1
+PREPROCESS_CHUNK_SIZE = 256
+DATASET_CACHE_ROOT = os.path.join("runs", "dataset_cache")
+PREPROCESS_CACHE_DATA_NAMES = {"local-jsonl", "hf"}
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(device)
@@ -333,23 +337,31 @@ class RawTensorBoardCallback(TrainerCallback):
             self.writer = None
         return control
 
-def _tokenize_fn(strings: Sequence[str], tokenizer: transformers.PreTrainedTokenizer) -> Dict:
+def tokenize_text_batch(
+    texts: Sequence[str],
+    tokenizer: transformers.PreTrainedTokenizer,
+    model_max_length: int,
+) -> List[torch.Tensor]:
+    if not texts:
+        return []
+    tokenized = tokenizer(
+        list(texts),
+        padding=False,
+        truncation=True,
+        max_length=model_max_length,
+        return_attention_mask=False,
+    )
+    return [torch.tensor(input_ids, dtype=torch.long) for input_ids in tokenized["input_ids"]]
+
+
+def _tokenize_fn(
+    strings: Sequence[str],
+    tokenizer: transformers.PreTrainedTokenizer,
+    model_max_length: int,
+) -> Dict:
     """Tokenize a list of strings."""
-    tokenized_list = [
-        tokenizer(
-            text,
-            return_tensors="pt",
-            padding="longest",
-            max_length=256,#training_args.model_max_length,
-            truncation=True,
-            return_attention_mask=False
-        )
-        for text in strings
-    ]
-    input_ids = labels = [tokenized.input_ids[0] for tokenized in tokenized_list]
-    input_ids_lens = labels_lens = [
-        tokenized.input_ids.ne(tokenizer.pad_token_id).sum().item() for tokenized in tokenized_list
-    ]
+    input_ids = labels = tokenize_text_batch(strings, tokenizer, model_max_length)
+    input_ids_lens = labels_lens = [len(tokenized) for tokenized in input_ids]
     return dict(
         input_ids=input_ids,
         labels=labels,
@@ -380,6 +392,301 @@ def extract_answer_number(sentence: str) -> float:
         except ValueError as e:
             pred_answer = float('inf')
     return pred_answer
+
+
+def get_answer_token_position(
+    tokens: torch.Tensor,
+    answer_prompts: Sequence[torch.Tensor],
+    tokenizer: transformers.PreTrainedTokenizer,
+) -> int:
+    prompt = answer_prompts[0]
+    if tokens.numel() < prompt.numel():
+        raise ValueError(
+            f"Could not find answer prompt in token sequence of length {tokens.numel()}."
+        )
+
+    match_indices = (
+        (tokens.unfold(0, len(prompt), 1) == prompt)
+        .all(dim=1)
+        .nonzero(as_tuple=True)[0]
+    )
+    if match_indices.numel() == 0:
+        preview = tokenizer.decode(tokens.tolist(), skip_special_tokens=False)
+        raise ValueError(
+            f"Could not find answer prompt in token sequence. Preview: {preview[:200]!r}"
+        )
+    return int(match_indices[0].item()) + len(prompt)
+
+
+def format_supervised_example(
+    data_name: str,
+    example: Dict[str, Any],
+    example_idx: int,
+) -> Tuple[str, str, str]:
+    if data_name not in PREPROCESS_CACHE_DATA_NAMES:
+        raise ValueError(f"Unsupported cached preprocessing data_name={data_name!r}")
+
+    required_keys = ("question", "cot", "answer")
+    missing_keys = [key for key in required_keys if key not in example]
+    if missing_keys:
+        raise ValueError(
+            f"{data_name} sample at index {example_idx} is missing required keys: {missing_keys}"
+        )
+
+    question = str(example["question"]).strip() + "\n"
+    cot = str(example["cot"]).strip() + "\n"
+    answer = f"The answer is: {str(example['answer']).strip()}"
+    return question, cot, answer
+
+
+def _init_supervised_data_dict() -> Dict[str, List[Any]]:
+    return {
+        "encoder_input_ids": [],
+        "decoder_input_ids": [],
+        "ref_input_ids": [],
+        "labels": [],
+        "ref_answer_position": [],
+        "model_answer_position": [],
+        "ref_eos_position": [],
+        "model_eos_position": [],
+        "ref_labels": [],
+    }
+
+
+def _build_preprocessed_sample(
+    question_ids: torch.Tensor,
+    cot_ids: torch.Tensor,
+    answer_ids: torch.Tensor,
+    tokenizer: transformers.PreTrainedTokenizer,
+    bot_id: int,
+    eot_id: int,
+    remove_eos: bool,
+    answer_prompts: Sequence[torch.Tensor],
+) -> Dict[str, Any]:
+    eos_tensor = torch.tensor([tokenizer.eos_token_id], dtype=torch.long)
+
+    source_ids = question_ids.to(torch.long)
+    cot_ref_ids = cot_ids.to(torch.long)
+    answer_ref_ids = answer_ids.to(torch.long)
+
+    if not remove_eos:
+        source_ids = torch.cat((source_ids, eos_tensor))
+        cot_ref_ids = torch.cat((cot_ref_ids, eos_tensor))
+    answer_ref_ids = torch.cat((answer_ref_ids, eos_tensor))
+
+    if (
+        cot_ref_ids.numel() > 0
+        and tokenizer.bos_token_id is not None
+        and int(cot_ref_ids[0].item()) == tokenizer.bos_token_id
+    ):
+        cot_ref_ids = cot_ref_ids[1:]
+        answer_ref_ids = answer_ref_ids[1:]
+
+    ref_input_ids = torch.cat((source_ids, cot_ref_ids, answer_ref_ids)).to(torch.long)
+    ref_labels = ref_input_ids.clone()
+    ref_labels[: len(source_ids)] = IGNORE_INDEX
+
+    encoder_input_ids = torch.cat(
+        (source_ids, torch.tensor([bot_id], dtype=torch.long))
+    ).to(torch.long)
+    if remove_eos:
+        decoder_prefix = torch.tensor([eot_id], dtype=torch.long)
+    else:
+        decoder_prefix = torch.tensor([eot_id, tokenizer.eos_token_id], dtype=torch.long)
+    decoder_input_ids = torch.cat((decoder_prefix, answer_ref_ids)).to(torch.long)
+
+    ref_answer_position = get_answer_token_position(ref_input_ids, answer_prompts, tokenizer)
+    model_answer_position = get_answer_token_position(
+        decoder_input_ids, answer_prompts, tokenizer
+    )
+
+    return {
+        "encoder_input_ids": encoder_input_ids,
+        "decoder_input_ids": decoder_input_ids,
+        "ref_input_ids": ref_input_ids,
+        "labels": decoder_input_ids,
+        "ref_answer_position": ref_answer_position,
+        "model_answer_position": model_answer_position,
+        "ref_eos_position": len(ref_input_ids) - 1,
+        "model_eos_position": len(decoder_input_ids) - 1,
+        "ref_labels": ref_labels,
+    }
+
+
+def build_preprocessed_data_dict(
+    raw_data,
+    data_name: str,
+    tokenizer: transformers.PreTrainedTokenizer,
+    bot_id: int,
+    eot_id: int,
+    training_args: TrainingArguments,
+) -> Tuple[Dict[str, List[Any]], int, int]:
+    if raw_data is None:
+        raise ValueError(f"No dataset loaded for data_name={data_name}.")
+    if data_name not in PREPROCESS_CACHE_DATA_NAMES:
+        raise ValueError(f"Unsupported cached preprocessing data_name={data_name!r}")
+
+    logging.warning("Formatting inputs...")
+    logging.warning("Tokenizing inputs... This may take some time...")
+
+    answer_prompts = [
+        torch.tensor(tokenizer.encode("The answer is:"), dtype=torch.long),
+        torch.tensor(tokenizer.encode("The next step result is:"), dtype=torch.long),
+    ]
+    if (
+        answer_prompts[0].numel() > 0
+        and tokenizer.bos_token_id is not None
+        and int(answer_prompts[0][0].item()) == tokenizer.bos_token_id
+    ):
+        answer_prompts[0] = answer_prompts[0][1:]
+        answer_prompts[1] = answer_prompts[1][1:]
+
+    data_dict = _init_supervised_data_dict()
+    sequence_limit = min(training_args.max_token_num, training_args.model_max_length)
+    num_rows_seen = 0
+    num_rows_kept = 0
+    formatted_chunk: List[Tuple[str, str, str]] = []
+
+    def flush_chunk() -> None:
+        nonlocal num_rows_kept
+        if not formatted_chunk:
+            return
+
+        questions = [item[0] for item in formatted_chunk]
+        cots = [item[1] for item in formatted_chunk]
+        answers = [item[2] for item in formatted_chunk]
+
+        sources_id = tokenize_text_batch(
+            questions, tokenizer=tokenizer, model_max_length=training_args.model_max_length
+        )
+        cot_id = tokenize_text_batch(
+            cots, tokenizer=tokenizer, model_max_length=training_args.model_max_length
+        )
+        answers_id = tokenize_text_batch(
+            answers, tokenizer=tokenizer, model_max_length=training_args.model_max_length
+        )
+
+        for question_ids, cot_ids, answer_ids in zip(sources_id, cot_id, answers_id):
+            sample = _build_preprocessed_sample(
+                question_ids=question_ids,
+                cot_ids=cot_ids,
+                answer_ids=answer_ids,
+                tokenizer=tokenizer,
+                bot_id=bot_id,
+                eot_id=eot_id,
+                remove_eos=training_args.remove_eos,
+                answer_prompts=answer_prompts,
+            )
+            effective_length = max(
+                len(sample["ref_input_ids"]),
+                len(sample["encoder_input_ids"])
+                + training_args.num_latent
+                + len(sample["decoder_input_ids"]),
+            )
+            if effective_length > sequence_limit:
+                continue
+            for key, value in sample.items():
+                data_dict[key].append(value)
+            num_rows_kept += 1
+
+        formatted_chunk.clear()
+
+    total_rows = len(raw_data) if hasattr(raw_data, "__len__") else None
+    for num_iter, example in tqdm(enumerate(raw_data), total=total_rows):
+        if training_args.exp_mode and num_iter > training_args.exp_data_num:
+            break
+        num_rows_seen += 1
+        formatted_chunk.append(format_supervised_example(data_name, example, num_iter))
+        if len(formatted_chunk) >= PREPROCESS_CHUNK_SIZE:
+            flush_chunk()
+
+    flush_chunk()
+    logging.warning(
+        "Prepared %s rows for %s (%s kept, %s filtered, limit=%s).",
+        num_rows_seen,
+        data_name,
+        num_rows_kept,
+        num_rows_seen - num_rows_kept,
+        sequence_limit,
+    )
+    return data_dict, num_rows_seen, num_rows_kept
+
+
+def _resolve_dataset_cache_path(cache_key: Optional[str]) -> Optional[str]:
+    if cache_key is None:
+        return None
+    cache_key = cache_key.strip()
+    if not cache_key:
+        return None
+    filename = _sanitize_path_component(cache_key) + ".pt"
+    return os.path.join(DATASET_CACHE_ROOT, filename)
+
+
+def load_dataset_cache(cache_key: Optional[str]) -> Optional[Dict[str, Any]]:
+    cache_path = _resolve_dataset_cache_path(cache_key)
+    if cache_path is None or not os.path.isfile(cache_path):
+        return None
+
+    payload = torch.load(cache_path, map_location="cpu")
+    if not isinstance(payload, dict):
+        logging.warning("Ignoring invalid dataset cache payload at %s", cache_path)
+        return None
+    if payload.get("version") != PREPROCESS_CACHE_VERSION:
+        logging.warning("Ignoring dataset cache with mismatched version at %s", cache_path)
+        return None
+    if "data_dict" not in payload:
+        logging.warning("Ignoring dataset cache without data_dict at %s", cache_path)
+        return None
+    return payload
+
+
+def save_dataset_cache(cache_key: Optional[str], payload: Dict[str, Any]) -> None:
+    cache_path = _resolve_dataset_cache_path(cache_key)
+    if cache_path is None:
+        return
+
+    os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+    tmp_path = f"{cache_path}.tmp.{os.getpid()}"
+    try:
+        torch.save(payload, tmp_path)
+        os.replace(tmp_path, cache_path)
+    finally:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+
+
+def load_or_build_cached_data_dict(cache_key: Optional[str], data_name: str, build_fn):
+    cache_path = _resolve_dataset_cache_path(cache_key)
+    cached_payload = load_dataset_cache(cache_key)
+    if cached_payload is not None:
+        logging.warning("Dataset cache hit: %s", cache_path)
+        logging.warning(
+            "Using cached preprocessing stats: seen=%s kept=%s filtered=%s",
+            cached_payload.get("num_rows_seen"),
+            cached_payload.get("num_rows_kept"),
+            (cached_payload.get("num_rows_seen") or 0)
+            - (cached_payload.get("num_rows_kept") or 0),
+        )
+        return cached_payload["data_dict"]
+
+    if cache_path is not None:
+        logging.warning("Dataset cache miss: %s", cache_path)
+
+    data_dict, num_rows_seen, num_rows_kept = build_fn()
+    if cache_path is not None:
+        save_dataset_cache(
+            cache_key,
+            {
+                "version": PREPROCESS_CACHE_VERSION,
+                "cache_key": cache_key,
+                "data_name": data_name,
+                "data_dict": data_dict,
+                "num_rows_seen": num_rows_seen,
+                "num_rows_kept": num_rows_kept,
+            },
+        )
+        logging.warning("Saved dataset cache: %s", cache_path)
+    return data_dict
 
 def train():
     parser = transformers.HfArgumentParser((ModelArguments, DataArguments, TrainingArguments))
@@ -431,18 +738,6 @@ def train():
         if tokenizer.pad_token_id is None: # error handling
             tokenizer.pad_token_id = tokenizer.convert_tokens_to_ids('[PAD]')
 
-    def get_answer_token_position(tokens, answer_prompts, tokenizer):
-        #answer_prompt = torch.tensor([464, 3280, 318, 25])
-        # import pdb; pdb.set_trace()
-        try:
-            match_indices = (tokens.unfold(0, len(answer_prompts[0]), 1) == answer_prompts[0]).all(dim=1).nonzero(as_tuple=True)[0].item()
-            answer_token_id = match_indices + len(answer_prompts[0])
-            return answer_token_id
-        except Exception:
-            breakpoint()
-        
-    # def get_steps_
-
     def preprocess(
         sources: Sequence[str], 
         targets: Sequence[str], 
@@ -452,9 +747,15 @@ def train():
         eot_id: int,
     ) -> Dict:
         print("Tokenizing inputs... This may take some time...")
-        sources_id = _tokenize_fn(sources, tokenizer)["input_ids"]
-        cot_id = _tokenize_fn(targets, tokenizer)["input_ids"]
-        answers_id = _tokenize_fn(answers, tokenizer)["input_ids"]
+        sources_id = _tokenize_fn(
+            sources, tokenizer, model_max_length=training_args.model_max_length
+        )["input_ids"]
+        cot_id = _tokenize_fn(
+            targets, tokenizer, model_max_length=training_args.model_max_length
+        )["input_ids"]
+        answers_id = _tokenize_fn(
+            answers, tokenizer, model_max_length=training_args.model_max_length
+        )["input_ids"]
 
         # add eos token to accomodate pretrained model's format
         if not training_args.remove_eos:
@@ -481,7 +782,10 @@ def train():
         else:
             answers_id = [torch.tensor([eot_id, tokenizer.eos_token_id] + x.numpy().tolist(), dtype=torch.long) for x in answers_id]
 
-        answer_prompts = [torch.tensor(tokenizer.encode("The answer is:")), torch.tensor(tokenizer.encode("The next step result is:"))]
+        answer_prompts = [
+            torch.tensor(tokenizer.encode("The answer is:"), dtype=torch.long),
+            torch.tensor(tokenizer.encode("The next step result is:"), dtype=torch.long),
+        ]
         if answer_prompts[0][0] == tokenizer.bos_token_id: # remove the bos
             answer_prompts[0] = answer_prompts[0][1:]
             answer_prompts[1] = answer_prompts[1][1:]
@@ -499,11 +803,17 @@ def train():
     class SupervisedDataset(Dataset):
         QUESTION_PROMPT = "\nAnswer the above question. First think step by step and then answer the final number.\n"
         QUESTION_DA_PROMPT = "\nAnswer the above question. Answer the final number directly in one number.\n"
-        def __init__(self, data_name, raw_data, tokenizer, bot, eot):
+        def __init__(self, data_name, raw_data, tokenizer, bot, eot, data_dict=None):
             super(SupervisedDataset, self).__init__()
-            logging.warning("Formatting inputs...")
-            
             self.data_name = data_name
+            if data_dict is not None:
+                self.data_dict = data_dict
+                self.keys = list(self.data_dict.keys())
+                logging.warning("%s data in total...", len(self.data_dict["encoder_input_ids"]))
+                return
+
+            logging.warning("Formatting inputs...")
+
             questions, cots, answers = [], [], []
             num_ops_list = []
             operators = ["+", "-", "*", "/"]
@@ -670,19 +980,63 @@ def train():
                 raise ValueError(f"--data_path must point to a .jsonl file, got: {data_args.data_path}")
             if not os.path.isfile(data_args.data_path):
                 raise ValueError(f"JSONL file does not exist: {data_args.data_path}")
-            dataset = read_jsonl(data_args.data_path)
-            train_dataset = SupervisedDataset(data_name=data_args.data_name, raw_data=dataset, tokenizer=tokenizer, bot=model.bot_id, eot=model.eot_id)
+            def build_local_jsonl_data():
+                dataset = read_jsonl(data_args.data_path)
+                return build_preprocessed_data_dict(
+                    raw_data=dataset,
+                    data_name=data_args.data_name,
+                    tokenizer=tokenizer,
+                    bot_id=model.bot_id,
+                    eot_id=model.eot_id,
+                    training_args=training_args,
+                )
+
+            data_dict = load_or_build_cached_data_dict(
+                data_args.dataset_cache_key,
+                data_args.data_name,
+                build_local_jsonl_data,
+            )
+            train_dataset = SupervisedDataset(
+                data_name=data_args.data_name,
+                raw_data=None,
+                tokenizer=tokenizer,
+                bot=model.bot_id,
+                eot=model.eot_id,
+                data_dict=data_dict,
+            )
             data_collator = DataCollatorForSupervisedDataset(tokenizer=tokenizer)
             return dict(train_dataset=train_dataset, eval_dataset=None, data_collator=data_collator)
         elif data_args.data_name == "hf":
             if not data_args.hf_dataset_name:
                 raise ValueError("--hf_dataset_name is required when --data_name hf is used.")
-            dataset = load_dataset(data_args.hf_dataset_name)
-            if "train" not in dataset:
-                raise ValueError(
-                    f"Hugging Face dataset '{data_args.hf_dataset_name}' does not contain a 'train' split."
+            def build_hf_data():
+                dataset = load_dataset(data_args.hf_dataset_name)
+                if "train" not in dataset:
+                    raise ValueError(
+                        f"Hugging Face dataset '{data_args.hf_dataset_name}' does not contain a 'train' split."
+                    )
+                return build_preprocessed_data_dict(
+                    raw_data=dataset["train"],
+                    data_name=data_args.data_name,
+                    tokenizer=tokenizer,
+                    bot_id=model.bot_id,
+                    eot_id=model.eot_id,
+                    training_args=training_args,
                 )
-            train_dataset = SupervisedDataset(data_name=data_args.data_name, raw_data=dataset["train"], tokenizer=tokenizer, bot=model.bot_id, eot=model.eot_id)
+
+            data_dict = load_or_build_cached_data_dict(
+                data_args.dataset_cache_key,
+                data_args.data_name,
+                build_hf_data,
+            )
+            train_dataset = SupervisedDataset(
+                data_name=data_args.data_name,
+                raw_data=None,
+                tokenizer=tokenizer,
+                bot=model.bot_id,
+                eot=model.eot_id,
+                data_dict=data_dict,
+            )
             data_collator = DataCollatorForSupervisedDataset(tokenizer=tokenizer)
             return dict(train_dataset=train_dataset, eval_dataset=None, data_collator=data_collator)
         elif "icot" in data_args.data_name:

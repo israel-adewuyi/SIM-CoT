@@ -75,6 +75,10 @@ class DataArguments:
         default=None,
         metadata={"help": "Hugging Face dataset repo id for data_name=hf."},
     )
+    dataset_cache_key: Optional[str] = field(
+        default=None,
+        metadata={"help": "Manual cache key for tokenized local-jsonl/hf training datasets."},
+    )
     debug_data: bool = field(
         default=False,
         metadata={
