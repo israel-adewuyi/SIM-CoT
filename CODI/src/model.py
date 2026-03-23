@@ -1026,11 +1026,21 @@ class CODI(torch.nn.Module):
             else:
                 print(f'loss={ce_loss+distill_loss}, ce_loss={ce_loss}, distill_loss={distill_loss}, ce_loss_total={ce_loss_total}, distill_loss_total={distill_loss_total}, ref_ce_loss={ref_ce_loss}')
 
-        loss = ce_loss_total + distill_loss_total + ref_ce_loss
-
         if self.model_args.use_decoder:
-            explain_loss_total = torch.as_tensor(explain_loss_total, device=loss.device, dtype=loss.dtype)
-            loss += explain_loss_total
+            loss_device = ref_ce_loss.device if isinstance(ref_ce_loss, torch.Tensor) else latent_embd.device
+            loss_dtype = ref_ce_loss.dtype if isinstance(ref_ce_loss, torch.Tensor) else latent_embd.dtype
+            explain_loss_total = torch.as_tensor(explain_loss_total, device=loss_device, dtype=loss_dtype)
+        else:
+            explain_loss_total = None
+
+        student_loss = ce_loss_total + distill_loss_total
+        if explain_loss_total is not None:
+            student_loss = student_loss + explain_loss_total
+        teacher_loss = ref_ce_loss
+        loss = student_loss + teacher_loss
+
+        student_loss_raw = student_loss
+        teacher_loss_raw = teacher_loss
         # import pdb; pdb.set_trace()
         if ce_loss_total != 0:
             ce_loss_total = ce_loss_total.detach()
@@ -1046,6 +1056,23 @@ class CODI(torch.nn.Module):
         return_logits = None if self.training else logits
 
         if self.model_args.use_decoder:
-            return {"loss": loss, "logits": return_logits, "ce_loss": ce_loss_total, "distill_loss": distill_loss_total, "ref_ce_loss": ref_ce_loss, 'explain_loss': explain_loss_total}
+            return {
+                "loss": loss,
+                "student_loss": student_loss_raw,
+                "teacher_loss": teacher_loss_raw,
+                "logits": return_logits,
+                "ce_loss": ce_loss_total,
+                "distill_loss": distill_loss_total,
+                "ref_ce_loss": ref_ce_loss,
+                'explain_loss': explain_loss_total,
+            }
         else:
-            return {"loss": loss, "logits": return_logits, "ce_loss": ce_loss_total, "distill_loss": distill_loss_total, "ref_ce_loss": ref_ce_loss}
+            return {
+                "loss": loss,
+                "student_loss": student_loss_raw,
+                "teacher_loss": teacher_loss_raw,
+                "logits": return_logits,
+                "ce_loss": ce_loss_total,
+                "distill_loss": distill_loss_total,
+                "ref_ce_loss": ref_ce_loss,
+            }
