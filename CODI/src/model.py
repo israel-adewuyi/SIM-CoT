@@ -570,6 +570,20 @@ class CODI(torch.nn.Module):
             )
         return outputs.logits
 
+    def _teacher_ce_loss_forward(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: Optional[torch.Tensor],
+        target_ids: torch.Tensor,
+    ) -> torch.Tensor:
+        with autocast(dtype=torch.bfloat16):
+            logits = self.codi(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                output_hidden_states=False,
+            ).logits
+        return self._cross_entropy_chunked(logits[:, :-1, :], target_ids)
+
     def _cross_entropy_chunked(
         self,
         logits: torch.Tensor,
@@ -791,11 +805,14 @@ class CODI(torch.nn.Module):
                     attention_mask=ref_attention_mask,
                 )
         print_cuda_memory("after_teacher_no_grad", enabled=self.print_loss)
+        ref_target_ids = ref_labels[:, 1:]
+        ref_logits = None
         if self._use_activation_checkpointing():
-            ref_logits = checkpoint(
-                self._teacher_logits_forward,
+            ref_ce_loss = checkpoint(
+                self._teacher_ce_loss_forward,
                 ref_input_ids,
                 ref_attention_mask,
+                ref_target_ids,
                 use_reentrant=False,
             )
         else:
@@ -804,6 +821,7 @@ class CODI(torch.nn.Module):
                 output_hidden_states=False,
                 attention_mask=ref_attention_mask,
             ).logits
+            ref_ce_loss = self._cross_entropy_chunked(ref_logits[:, :-1, :], ref_target_ids)
         print_cuda_memory("after_teacher_with_grad", enabled=self.print_loss)
         
         # Formatting for deprecated exps
@@ -989,10 +1007,10 @@ class CODI(torch.nn.Module):
                         print_cuda_memory("after_student_loss_cleanup", enabled=self.print_loss)
 
         # Calculate the CE loss for the teacher task
-        ref_ce_loss = 0
-        ref_target_ids = ref_labels[:, 1:]
-        ref_ce_loss = self._cross_entropy_chunked(ref_logits[:, :-1, :], ref_target_ids)
+        ref_ce_loss = 0 if ref_ce_loss is None else ref_ce_loss
         ref_ce_loss *= self.ref_loss_factor 
+        if ref_logits is not None:
+            del ref_logits
         print_cuda_memory("after_teacher_ce_loss", enabled=self.print_loss)
 
         # Weigh the distillation loss
