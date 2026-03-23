@@ -610,12 +610,12 @@ class CODI(torch.nn.Module):
         outputs = backbone(
             input_ids=encoder_input_ids,
             use_cache=True,
-            output_hidden_states=True,
+            output_hidden_states=False,
             past_key_values=past_key_values,
             attention_mask=encoder_attention_mask,
         )
         past_key_values = outputs.past_key_values
-        latent_embd = outputs.hidden_states[-1][:, -1, :].unsqueeze(1) # as the next input
+        latent_embd = outputs.last_hidden_state[:, -1, :].unsqueeze(1) # as the next input
         print_cuda_memory("after_encoder", enabled=self.print_loss)
         del outputs
         # import pdb; pdb.set_trace()
@@ -805,12 +805,12 @@ class CODI(torch.nn.Module):
                     outputs = backbone(
                         inputs_embeds=latent_embd,
                         use_cache=True,
-                        output_hidden_states=True,
+                        output_hidden_states=False,
                         past_key_values=past_key_values,
                     )
                 # outputs = self.codi(inputs_embeds=latent_embd, use_cache=True, output_hidden_states=True, past_key_values=past_key_values)
                 past_key_values = outputs.past_key_values
-                latent_embd = outputs.hidden_states[-1][:, -1, :].unsqueeze(1)
+                latent_embd = outputs.last_hidden_state[:, -1, :].unsqueeze(1)
                 print_cuda_memory(f"after_latent_step_{i}", enabled=self.print_loss)
                 del outputs
                 if self.use_prj:
