@@ -24,6 +24,19 @@ from typing import List, Sequence, Iterable, Union, Optional
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
+def print_cuda_memory(tag: str, enabled: bool = True) -> None:
+    if not enabled or not torch.cuda.is_available():
+        return
+
+    allocated_gb = torch.cuda.memory_allocated() / (1024 ** 3)
+    reserved_gb = torch.cuda.memory_reserved() / (1024 ** 3)
+    peak_gb = torch.cuda.max_memory_allocated() / (1024 ** 3)
+    print(
+        f"[MEM] {tag}: alloc={allocated_gb:.2f} GiB "
+        f"reserved={reserved_gb:.2f} GiB peak={peak_gb:.2f} GiB"
+    )
+
+
 @dataclass
 class ModelArguments:
     model_name_or_path: str = field(default="mistralai/Mistral-7B-Instruct-v0.2")
@@ -537,12 +550,17 @@ class CODI(torch.nn.Module):
     ):
         if not self.fix_attn_mask:
             ref_attention_mask = None
+
+        if self.print_loss and torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats()
+        print_cuda_memory("forward_start", enabled=self.print_loss)
         
         # Encode the question
         past_key_values = None
         outputs = self.codi(input_ids=encoder_input_ids, use_cache=True, output_hidden_states=True, past_key_values=past_key_values, attention_mask=encoder_attention_mask)
         past_key_values = outputs.past_key_values
         latent_embd = outputs.hidden_states[-1][:, -1, :].unsqueeze(1) # as the next input
+        print_cuda_memory("after_encoder", enabled=self.print_loss)
         del outputs
         # import pdb; pdb.set_trace()
         
@@ -645,6 +663,7 @@ class CODI(torch.nn.Module):
                     explain_loss = self.loss_fct(shift_explain_logits, shift_explain_labels)
                     effective_steps_cnt += 1
                 explain_loss_total += explain_loss
+                print_cuda_memory("after_explain_step_0", enabled=self.print_loss)
                 del explain_outputs, explain_logits, shift_explain_logits, shift_explain_labels
             # print(forward_idx, explain_loss, explain_loss_total)
             # import pdb; pdb.set_trace()
@@ -661,7 +680,9 @@ class CODI(torch.nn.Module):
 
         with torch.no_grad():
             ref_outputs = self.codi(input_ids=ref_input_ids, output_hidden_states=True, attention_mask=ref_attention_mask)
+        print_cuda_memory("after_teacher_no_grad", enabled=self.print_loss)
         ref_outputs_with_grad = self.codi(input_ids=ref_input_ids, output_hidden_states=False, attention_mask=ref_attention_mask) 
+        print_cuda_memory("after_teacher_with_grad", enabled=self.print_loss)
         
         # Formatting for deprecated exps
         ref_outputs_list = [ref_outputs] 
@@ -703,6 +724,7 @@ class CODI(torch.nn.Module):
                 # outputs = self.codi(inputs_embeds=latent_embd, use_cache=True, output_hidden_states=True, past_key_values=past_key_values)
                 past_key_values = outputs.past_key_values
                 latent_embd = outputs.hidden_states[-1][:, -1, :].unsqueeze(1)
+                print_cuda_memory(f"after_latent_step_{i}", enabled=self.print_loss)
                 del outputs
                 if self.use_prj:
                     with autocast(dtype=torch.bfloat16, enabled=True):
@@ -766,6 +788,7 @@ class CODI(torch.nn.Module):
                             effective_steps_cnt += 1
                         
                         explain_loss_total += explain_loss
+                        print_cuda_memory(f"after_explain_step_{forward_idx - 1}", enabled=self.print_loss)
                         del explain_outputs, explain_logits, shift_explain_logits, shift_explain_labels
                     # print(forward_idx, explain_loss, explain_loss_total)
                     # import pdb; pdb.set_trace()
@@ -784,8 +807,10 @@ class CODI(torch.nn.Module):
                         dynamic_mask = dynamic_mask.bool()
                     # Student task's output
 
+                    print_cuda_memory("before_final_student_decode", enabled=self.print_loss)
                     with autocast(dtype=torch.bfloat16):
                         outputs = self.codi(inputs_embeds=embds, use_cache=True, output_hidden_states=True, past_key_values=past_key_values, attention_mask=dynamic_mask) 
+                    print_cuda_memory("after_final_student_decode", enabled=self.print_loss)
                     # outputs = self.codi(inputs_embeds=embds, use_cache=True, output_hidden_states=True, past_key_values=past_key_values, attention_mask=dynamic_mask) 
                     # Teacher task's output
                     ref_outputs = ref_outputs_list[0]
@@ -829,6 +854,7 @@ class CODI(torch.nn.Module):
         ref_target_ids = ref_labels[:, 1:].reshape(-1)
         ref_ce_loss = self.loss_fct(effective_ref_logits, ref_target_ids)
         ref_ce_loss *= self.ref_loss_factor 
+        print_cuda_memory("after_teacher_ce_loss", enabled=self.print_loss)
 
         # Weigh the distillation loss
         distill_loss *= self.distill_loss_factor
