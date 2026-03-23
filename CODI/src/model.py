@@ -537,6 +537,12 @@ class CODI(torch.nn.Module):
     ):
         if not self.fix_attn_mask:
             ref_attention_mask = None
+
+        try:
+            device = next(self.codi.parameters()).device
+        except (StopIteration, AttributeError):
+            # Fallback to CUDA if parameters can't be accessed
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
         # Encode the question
         past_key_values = None
@@ -590,7 +596,7 @@ class CODI(torch.nn.Module):
             for bz_idx in range(bz):
                 explain_embds_list.append(steps_pad_list[bz_idx][forward_idx])
                 explain_embds_list = dedup_trailing_pads(explain_embds_list, pad_id=self.tokenizer.pad_token_id)
-            indices = torch.tensor(explain_embds_list, dtype=torch.long, device=self.codi.device)
+            indices = torch.tensor(explain_embds_list, dtype=torch.long, device=device)
             explain_embds = self.get_embd(self.codi, self.model_name)(indices)
             explain_embds = torch.concat([latent_embd, explain_embds], dim=1)
             
