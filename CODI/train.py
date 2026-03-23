@@ -202,7 +202,7 @@ class CustomTrainer(Trainer):
         }
         return merged, consumed_tokens
 
-    def compute_loss(self, model, inputs, num_items_in_batch):
+    def compute_loss(self, model, inputs, num_items_in_batch, return_outputs=False):
         # Extract the global step from the optimizer
         step = self.state.global_step
 
@@ -240,7 +240,54 @@ class CustomTrainer(Trainer):
             # global_step is incremented after optimizer.step(), so cache metrics for the next step index.
             self._flush_micro_accum_to_pending(int(step) + 1)
 
+        if return_outputs:
+            return loss, outputs
         return loss
+
+    def training_step(self, model, inputs, num_items_in_batch=None):
+        model.train()
+        if hasattr(self.optimizer, "train") and callable(self.optimizer.train):
+            self.optimizer.train()
+
+        inputs = self._prepare_inputs(inputs)
+
+        with self.compute_loss_context_manager():
+            loss, outputs = self.compute_loss(
+                model,
+                inputs,
+                num_items_in_batch=num_items_in_batch,
+                return_outputs=True,
+            )
+
+        del inputs
+
+        student_loss = outputs.get("student_loss")
+        teacher_loss = outputs.get("teacher_loss")
+
+        if self.args.n_gpu > 1:
+            loss = loss.mean()
+            if student_loss is not None:
+                student_loss = student_loss.mean()
+            if teacher_loss is not None:
+                teacher_loss = teacher_loss.mean()
+
+        if self.use_apex:
+            from apex import amp
+            with amp.scale_loss(loss, self.optimizer) as scaled_loss:
+                scaled_loss.backward()
+            return loss.detach()
+
+        grad_acc_steps = max(1, self.args.gradient_accumulation_steps)
+        student_loss = student_loss / grad_acc_steps if student_loss is not None else None
+        teacher_loss = teacher_loss / grad_acc_steps if teacher_loss is not None else None
+
+        if student_loss is not None:
+            self.accelerator.backward(student_loss)
+        if teacher_loss is not None:
+            self.accelerator.backward(teacher_loss)
+
+        del outputs, student_loss, teacher_loss
+        return loss.detach()
 
     def log(self, logs, start_time=None):
         if not self.is_world_process_zero():
