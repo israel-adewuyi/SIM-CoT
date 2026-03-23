@@ -802,6 +802,17 @@ class CODI(torch.nn.Module):
         # the model answer position is the position of the eot token to predict the first token of the response
         model_answer_position = model_answer_position - 1
         ref_answer_position = ref_answer_position -1
+
+        ref_selected_states = tuple(
+            ref_state.gather(
+                1,
+                ref_answer_position.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, ref_state.size(-1)),
+            ).detach()
+            for ref_state in ref_outputs.hidden_states
+        )
+        del ref_outputs
+        ref_outputs_list = []
+        print_cuda_memory("after_teacher_state_compaction", enabled=self.print_loss)
       
         num_latent = self.num_latent
         if self.num_latent != 0:
@@ -909,20 +920,17 @@ class CODI(torch.nn.Module):
 
                     print_cuda_memory("before_final_student_decode", enabled=self.print_loss)
                     with autocast(dtype=torch.bfloat16):
-                        outputs = self.codi(inputs_embeds=embds, use_cache=True, output_hidden_states=True, past_key_values=past_key_values, attention_mask=dynamic_mask) 
+                        outputs = self.codi(inputs_embeds=embds, use_cache=False, output_hidden_states=True, past_key_values=past_key_values, attention_mask=dynamic_mask) 
                     print_cuda_memory("after_final_student_decode", enabled=self.print_loss)
                     # outputs = self.codi(inputs_embeds=embds, use_cache=True, output_hidden_states=True, past_key_values=past_key_values, attention_mask=dynamic_mask) 
-                    # Teacher task's output
-                    ref_outputs = ref_outputs_list[0]
-                    
+
                     distill_loss = 0
                     # Calculate distillation loss between the teacher's logits and the student's logits for every layer
-                    for j, (out, ref_out) in enumerate(zip(outputs.hidden_states, ref_outputs.hidden_states)):
+                    for j, (out, ref_selected) in enumerate(zip(outputs.hidden_states, ref_selected_states)):
                         # import pdb; pdb.set_trace()
-                        ref_selected = ref_out.gather(1, ref_answer_position.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, ref_out.size(-1)))
                         out_selected = out.gather(1, model_answer_position.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, out.size(-1)))
 
-                        distill_loss_tmp = self.distill_loss_fct(out_selected, ref_selected.detach())
+                        distill_loss_tmp = self.distill_loss_fct(out_selected, ref_selected)
                         
                         if self.distill_loss_div_std:
                             if self.distill_loss_type == 'l2':
