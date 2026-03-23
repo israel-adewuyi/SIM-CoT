@@ -570,6 +570,37 @@ class CODI(torch.nn.Module):
             )
         return outputs.logits
 
+    def _cross_entropy_chunked(
+        self,
+        logits: torch.Tensor,
+        targets: torch.Tensor,
+        chunk_size: int = 128,
+    ) -> torch.Tensor:
+        total_loss = logits.new_zeros(())
+        total_tokens = 0
+        vocab_size = logits.size(-1)
+
+        for start in range(0, targets.size(1), chunk_size):
+            end = min(start + chunk_size, targets.size(1))
+            chunk_logits = logits[:, start:end, :].reshape(-1, vocab_size)
+            chunk_targets = targets[:, start:end].reshape(-1)
+            valid_mask = chunk_targets != -100
+            if not valid_mask.any():
+                continue
+
+            valid_logits = chunk_logits[valid_mask].float()
+            valid_targets = chunk_targets[valid_mask]
+            total_loss = total_loss + F.cross_entropy(
+                valid_logits,
+                valid_targets,
+                reduction="sum",
+            )
+            total_tokens += int(valid_mask.sum().item())
+
+        if total_tokens == 0:
+            return logits.new_zeros(())
+        return total_loss / total_tokens
+
     def init(self):
         print_trainable_parameters(self)
         if (
@@ -948,18 +979,16 @@ class CODI(torch.nn.Module):
                     # Calculate the CE loss for the student task
                     if i == num_latent - 1:
                         logits = outputs.logits
-                        effective_logits = logits[:, :-1, :]
-                        effective_logits = effective_logits.reshape(-1, logits.size(-1))
-                        target_ids = labels[:, 1:].reshape(-1)                        
-                        ce_loss = self.loss_fct(effective_logits, target_ids)
+                        target_ids = labels[:, 1:]
+                        ce_loss = self._cross_entropy_chunked(logits[:, :-1, :], target_ids)
                         ce_loss_total += ce_loss
+                        del outputs, logits, embds, ref_selected_states
+                        print_cuda_memory("after_student_loss_cleanup", enabled=self.print_loss)
 
         # Calculate the CE loss for the teacher task
         ref_ce_loss = 0
-        effective_ref_logits = ref_logits[:, :-1, :]
-        effective_ref_logits = effective_ref_logits.reshape(-1, ref_logits.size(-1))
-        ref_target_ids = ref_labels[:, 1:].reshape(-1)
-        ref_ce_loss = self.loss_fct(effective_ref_logits, ref_target_ids)
+        ref_target_ids = ref_labels[:, 1:]
+        ref_ce_loss = self._cross_entropy_chunked(ref_logits[:, :-1, :], ref_target_ids)
         ref_ce_loss *= self.ref_loss_factor 
         print_cuda_memory("after_teacher_ce_loss", enabled=self.print_loss)
 
