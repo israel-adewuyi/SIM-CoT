@@ -271,7 +271,7 @@ class CustomTrainer(Trainer):
             if teacher_loss is not None:
                 teacher_loss = teacher_loss.mean()
 
-        if self.use_apex:
+        if getattr(self, "use_apex", False):
             from apex import amp
             with amp.scale_loss(loss, self.optimizer) as scaled_loss:
                 scaled_loss.backward()
