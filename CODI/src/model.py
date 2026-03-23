@@ -522,6 +522,25 @@ class CODI(torch.nn.Module):
                 return model.gpt_neox.embed_in
             raise NotImplementedError
 
+    def get_backbone(self, model, model_name):
+        try:
+            if "pythia" in model_name.lower():
+                return model.get_base_model().gpt_neox
+            elif "gpt2" in model_name.lower():
+                try:
+                    return model.get_base_model().transformer
+                except Exception:  # no lora
+                    return model.transformer
+            else:
+                try:
+                    return model.get_base_model().model
+                except Exception:  # no lora
+                    return model.model
+        except AttributeError:
+            if "pythia" in model_name.lower():
+                return model.gpt_neox
+            raise NotImplementedError
+
     def _use_activation_checkpointing(self) -> bool:
         return self.training and torch.is_grad_enabled()
 
@@ -591,10 +610,17 @@ class CODI(torch.nn.Module):
             torch.cuda.reset_peak_memory_stats()
         print_cuda_memory("forward_start", enabled=self.print_loss)
 
+        backbone = self.get_backbone(self.codi, self.model_name)
         
         # Encode the question
         past_key_values = None
-        outputs = self.codi(input_ids=encoder_input_ids, use_cache=True, output_hidden_states=True, past_key_values=past_key_values, attention_mask=encoder_attention_mask)
+        outputs = backbone(
+            input_ids=encoder_input_ids,
+            use_cache=True,
+            output_hidden_states=True,
+            past_key_values=past_key_values,
+            attention_mask=encoder_attention_mask,
+        )
         past_key_values = outputs.past_key_values
         latent_embd = outputs.hidden_states[-1][:, -1, :].unsqueeze(1) # as the next input
         print_cuda_memory("after_encoder", enabled=self.print_loss)
@@ -719,7 +745,18 @@ class CODI(torch.nn.Module):
         ce_loss_total = 0
 
         with torch.no_grad():
-            ref_outputs = self.codi(input_ids=ref_input_ids, output_hidden_states=True, attention_mask=ref_attention_mask)
+            if self.training_args.print_ref_model_stats:
+                ref_outputs = self.codi(
+                    input_ids=ref_input_ids,
+                    output_hidden_states=True,
+                    attention_mask=ref_attention_mask,
+                )
+            else:
+                ref_outputs = backbone(
+                    input_ids=ref_input_ids,
+                    output_hidden_states=True,
+                    attention_mask=ref_attention_mask,
+                )
         print_cuda_memory("after_teacher_no_grad", enabled=self.print_loss)
         if self._use_activation_checkpointing():
             ref_logits = checkpoint(
@@ -772,7 +809,12 @@ class CODI(torch.nn.Module):
                 # Implicit CoT generation
                 # import pdb; pdb.set_trace()
                 with autocast(dtype=torch.bfloat16):
-                    outputs = self.codi(inputs_embeds=latent_embd, use_cache=True, output_hidden_states=True, past_key_values=past_key_values)
+                    outputs = backbone(
+                        inputs_embeds=latent_embd,
+                        use_cache=True,
+                        output_hidden_states=True,
+                        past_key_values=past_key_values,
+                    )
                 # outputs = self.codi(inputs_embeds=latent_embd, use_cache=True, output_hidden_states=True, past_key_values=past_key_values)
                 past_key_values = outputs.past_key_values
                 latent_embd = outputs.hidden_states[-1][:, -1, :].unsqueeze(1)
