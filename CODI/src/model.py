@@ -543,6 +543,7 @@ class CODI(torch.nn.Module):
         outputs = self.codi(input_ids=encoder_input_ids, use_cache=True, output_hidden_states=True, past_key_values=past_key_values, attention_mask=encoder_attention_mask)
         past_key_values = outputs.past_key_values
         latent_embd = outputs.hidden_states[-1][:, -1, :].unsqueeze(1) # as the next input
+        del outputs
         # import pdb; pdb.set_trace()
         
         if self.model_args.use_decoder:
@@ -618,7 +619,7 @@ class CODI(torch.nn.Module):
                     explain_outputs = self.decoder(
                         inputs_embeds=explain_embds,
                         attention_mask=explain_attention_mask,
-                        output_hidden_states=True
+                        output_hidden_states=False
                     )
 
                 
@@ -644,6 +645,7 @@ class CODI(torch.nn.Module):
                     explain_loss = self.loss_fct(shift_explain_logits, shift_explain_labels)
                     effective_steps_cnt += 1
                 explain_loss_total += explain_loss
+                del explain_outputs, explain_logits, shift_explain_logits, shift_explain_labels
             # print(forward_idx, explain_loss, explain_loss_total)
             # import pdb; pdb.set_trace()
             # print()
@@ -659,7 +661,7 @@ class CODI(torch.nn.Module):
 
         with torch.no_grad():
             ref_outputs = self.codi(input_ids=ref_input_ids, output_hidden_states=True, attention_mask=ref_attention_mask)
-        ref_outputs_with_grad = self.codi(input_ids=ref_input_ids, output_hidden_states=True, attention_mask=ref_attention_mask) 
+        ref_outputs_with_grad = self.codi(input_ids=ref_input_ids, output_hidden_states=False, attention_mask=ref_attention_mask) 
         
         # Formatting for deprecated exps
         ref_outputs_list = [ref_outputs] 
@@ -701,6 +703,7 @@ class CODI(torch.nn.Module):
                 # outputs = self.codi(inputs_embeds=latent_embd, use_cache=True, output_hidden_states=True, past_key_values=past_key_values)
                 past_key_values = outputs.past_key_values
                 latent_embd = outputs.hidden_states[-1][:, -1, :].unsqueeze(1)
+                del outputs
                 if self.use_prj:
                     with autocast(dtype=torch.bfloat16, enabled=True):
                         latent_embd = self.prj(latent_embd)
@@ -739,7 +742,7 @@ class CODI(torch.nn.Module):
                             explain_outputs = self.decoder(
                                 inputs_embeds=explain_embds,
                                 attention_mask=explain_attention_mask,
-                                output_hidden_states=True
+                                output_hidden_states=False
                             )
                         # explain_outputs = self.decoder(
                         #     inputs_embeds=explain_embds,
@@ -763,6 +766,7 @@ class CODI(torch.nn.Module):
                             effective_steps_cnt += 1
                         
                         explain_loss_total += explain_loss
+                        del explain_outputs, explain_logits, shift_explain_logits, shift_explain_labels
                     # print(forward_idx, explain_loss, explain_loss_total)
                     # import pdb; pdb.set_trace()
                     # print()
