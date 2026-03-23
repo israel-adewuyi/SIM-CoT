@@ -768,6 +768,8 @@ class CODI(torch.nn.Module):
 
         len_pred_loss = 0
         dynamic_mask = None
+        logits = None
+
         if self.fix_attn_mask:
             dynamic_mask = torch.ones((encoder_attention_mask.size(0), self.num_latent), device=ref_labels.device)
 
@@ -983,6 +985,7 @@ class CODI(torch.nn.Module):
                         ce_loss = self._cross_entropy_chunked(logits[:, :-1, :], target_ids)
                         ce_loss_total += ce_loss
                         del outputs, logits, embds, ref_selected_states
+                        logits = None
                         print_cuda_memory("after_student_loss_cleanup", enabled=self.print_loss)
 
         # Calculate the CE loss for the teacher task
@@ -1022,7 +1025,9 @@ class CODI(torch.nn.Module):
                 explain_loss_total = explain_loss_total.detach()
         # print(f"{ce_loss_total=}, {distill_loss_total=}, {ref_ce_loss=}, {explain_loss_total}")
 
+        return_logits = None if self.training else logits
+
         if self.model_args.use_decoder:
-            return {"loss": loss, "logits": logits, "ce_loss": ce_loss_total, "distill_loss": distill_loss_total, "ref_ce_loss": ref_ce_loss, 'explain_loss': explain_loss_total}
+            return {"loss": loss, "logits": return_logits, "ce_loss": ce_loss_total, "distill_loss": distill_loss_total, "ref_ce_loss": ref_ce_loss, 'explain_loss': explain_loss_total}
         else:
-            return {"loss": loss, "logits": logits, "ce_loss": ce_loss_total, "distill_loss": distill_loss_total, "ref_ce_loss": ref_ce_loss}
+            return {"loss": loss, "logits": return_logits, "ce_loss": ce_loss_total, "distill_loss": distill_loss_total, "ref_ce_loss": ref_ce_loss}
