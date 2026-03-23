@@ -20,6 +20,7 @@ from transformers.modeling_outputs import ModelOutput
 import random
 import copy
 from torch.cuda.amp import autocast
+from torch.utils.checkpoint import checkpoint
 from typing import List, Sequence, Iterable, Union, Optional
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -521,6 +522,35 @@ class CODI(torch.nn.Module):
                 return model.gpt_neox.embed_in
             raise NotImplementedError
 
+    def _use_activation_checkpointing(self) -> bool:
+        return self.training and torch.is_grad_enabled()
+
+    def _decoder_logits_forward(
+        self,
+        inputs_embeds: torch.Tensor,
+        attention_mask: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        with autocast(dtype=torch.bfloat16):
+            outputs = self.decoder(
+                inputs_embeds=inputs_embeds,
+                attention_mask=attention_mask,
+                output_hidden_states=False,
+            )
+        return outputs.logits
+
+    def _teacher_logits_forward(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        with autocast(dtype=torch.bfloat16):
+            outputs = self.codi(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                output_hidden_states=False,
+            )
+        return outputs.logits
+
     def init(self):
         print_trainable_parameters(self)
         if (
@@ -639,21 +669,22 @@ class CODI(torch.nn.Module):
             if (explain_labels != -100).sum() == 0:
                 explain_loss_total += 0.0
             else:
-                
-                with autocast(dtype=torch.bfloat16):
-                    explain_outputs = self.decoder(
-                        inputs_embeds=explain_embds,
-                        attention_mask=explain_attention_mask,
-                        output_hidden_states=False
+                explain_outputs = None
+                if self._use_activation_checkpointing():
+                    explain_logits = checkpoint(
+                        self._decoder_logits_forward,
+                        explain_embds,
+                        explain_attention_mask,
+                        use_reentrant=False,
                     )
-
-                
-                # explain_outputs = self.decoder(
-                #         inputs_embeds=explain_embds,
-                #         attention_mask=explain_attention_mask,
-                #         output_hidden_states=True
-                #     )
-                explain_logits = explain_outputs.logits
+                else:
+                    with autocast(dtype=torch.bfloat16):
+                        explain_outputs = self.decoder(
+                            inputs_embeds=explain_embds,
+                            attention_mask=explain_attention_mask,
+                            output_hidden_states=False
+                        )
+                    explain_logits = explain_outputs.logits
 
                 if self.model_args.decoder_path:
                     explain_logits = self.pj_out(explain_logits)
@@ -671,7 +702,9 @@ class CODI(torch.nn.Module):
                     effective_steps_cnt += 1
                 explain_loss_total += explain_loss
                 print_cuda_memory("after_explain_step_0", enabled=self.print_loss)
-                del explain_outputs, explain_logits, shift_explain_logits, shift_explain_labels
+                if explain_outputs is not None:
+                    del explain_outputs
+                del explain_logits, shift_explain_logits, shift_explain_labels
             # print(forward_idx, explain_loss, explain_loss_total)
             # import pdb; pdb.set_trace()
             # print()
@@ -688,7 +721,19 @@ class CODI(torch.nn.Module):
         with torch.no_grad():
             ref_outputs = self.codi(input_ids=ref_input_ids, output_hidden_states=True, attention_mask=ref_attention_mask)
         print_cuda_memory("after_teacher_no_grad", enabled=self.print_loss)
-        ref_outputs_with_grad = self.codi(input_ids=ref_input_ids, output_hidden_states=False, attention_mask=ref_attention_mask) 
+        if self._use_activation_checkpointing():
+            ref_logits = checkpoint(
+                self._teacher_logits_forward,
+                ref_input_ids,
+                ref_attention_mask,
+                use_reentrant=False,
+            )
+        else:
+            ref_logits = self.codi(
+                input_ids=ref_input_ids,
+                output_hidden_states=False,
+                attention_mask=ref_attention_mask,
+            ).logits
         print_cuda_memory("after_teacher_with_grad", enabled=self.print_loss)
         
         # Formatting for deprecated exps
@@ -767,18 +812,22 @@ class CODI(torch.nn.Module):
                     if (explain_labels != -100).sum() == 0:
                         explain_loss_total += 0.0
                     else:
-                        with autocast(dtype=torch.bfloat16):
-                            explain_outputs = self.decoder(
-                                inputs_embeds=explain_embds,
-                                attention_mask=explain_attention_mask,
-                                output_hidden_states=False
+                        explain_outputs = None
+                        if self._use_activation_checkpointing():
+                            explain_logits = checkpoint(
+                                self._decoder_logits_forward,
+                                explain_embds,
+                                explain_attention_mask,
+                                use_reentrant=False,
                             )
-                        # explain_outputs = self.decoder(
-                        #     inputs_embeds=explain_embds,
-                        #     attention_mask=explain_attention_mask,
-                        #     output_hidden_states=True
-                        # )
-                        explain_logits = explain_outputs.logits
+                        else:
+                            with autocast(dtype=torch.bfloat16):
+                                explain_outputs = self.decoder(
+                                    inputs_embeds=explain_embds,
+                                    attention_mask=explain_attention_mask,
+                                    output_hidden_states=False
+                                )
+                            explain_logits = explain_outputs.logits
 
                         if self.model_args.decoder_path:
                             explain_logits = self.pj_out(explain_logits)
@@ -796,7 +845,9 @@ class CODI(torch.nn.Module):
                         
                         explain_loss_total += explain_loss
                         print_cuda_memory(f"after_explain_step_{forward_idx - 1}", enabled=self.print_loss)
-                        del explain_outputs, explain_logits, shift_explain_logits, shift_explain_labels
+                        if explain_outputs is not None:
+                            del explain_outputs
+                        del explain_logits, shift_explain_logits, shift_explain_labels
                     # print(forward_idx, explain_loss, explain_loss_total)
                     # import pdb; pdb.set_trace()
                     # print()
@@ -855,7 +906,6 @@ class CODI(torch.nn.Module):
 
         # Calculate the CE loss for the teacher task
         ref_ce_loss = 0
-        ref_logits = ref_outputs_with_grad.logits
         effective_ref_logits = ref_logits[:, :-1, :]
         effective_ref_logits = effective_ref_logits.reshape(-1, ref_logits.size(-1))
         ref_target_ids = ref_labels[:, 1:].reshape(-1)
