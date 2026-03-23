@@ -894,7 +894,7 @@ class CODI(torch.nn.Module):
                         explain_embds_list.append(steps_pad_list[bz_idx][forward_idx])
                         explain_embds_list = dedup_trailing_pads(explain_embds_list, pad_id=self.tokenizer.pad_token_id)
                     # import pdb; pdb.set_trace()
-                    indices = torch.tensor(explain_embds_list, dtype=torch.long, device=self.codi.device)
+                    indices = torch.tensor(explain_embds_list, dtype=torch.long, device=latent_embd.device)
                     explain_embds = self.get_embd(self.codi, self.model_name)(indices)
                     explain_embds = torch.concat([latent_embd, explain_embds], dim=1)
                     
