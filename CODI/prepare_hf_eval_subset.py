@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List
 
 from datasets import load_dataset
+from transformers import AutoTokenizer
 
 
 def parse_args() -> argparse.Namespace:
@@ -36,6 +37,18 @@ def parse_args() -> argparse.Namespace:
         choices=("shuffle", "head"),
         default="shuffle",
         help="How to choose the subset before writing it. Default: shuffle",
+    )
+    parser.add_argument(
+        "--tokenizer_name_or_path",
+        type=str,
+        default="Qwen/Qwen3-4B",
+        help="Tokenizer used to measure question token length. Default: Qwen/Qwen3-4B",
+    )
+    parser.add_argument(
+        "--max_question_tokens",
+        type=int,
+        required=True,
+        help="Keep only rows whose question tokenized length is <= this value.",
     )
     parser.add_argument(
         "--output_path",
@@ -129,6 +142,62 @@ def validate_row(row: Dict[str, Any], dataset_name: str, split: str, row_idx: in
             )
 
 
+def normalize_content(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        chunks: List[str] = []
+        for item in content:
+            if isinstance(item, dict) and "text" in item:
+                chunks.append(str(item["text"]))
+            else:
+                chunks.append(str(item))
+        return "\n".join(chunks)
+    return str(content)
+
+
+def render_question_for_tokenizer(question: Any, tokenizer: Any) -> str:
+    if isinstance(question, str):
+        return question.strip()
+    if not isinstance(question, list):
+        raise ValueError(
+            f"Unsupported question type {type(question).__name__}; expected str or list."
+        )
+
+    normalized: List[Dict[str, str]] = []
+    for idx, message in enumerate(question):
+        if not isinstance(message, dict):
+            raise ValueError(
+                f"Question message at position {idx} must be a dict, got {type(message).__name__}."
+            )
+        if "role" not in message or "content" not in message:
+            raise ValueError(
+                f"Question message at position {idx} must contain role and content."
+            )
+        normalized.append(
+            {
+                "role": str(message["role"]).strip(),
+                "content": normalize_content(message["content"]).strip(),
+            }
+        )
+
+    if tokenizer.chat_template:
+        return tokenizer.apply_chat_template(
+            normalized,
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+
+    lines = [f"{message['role']}: {message['content']}" for message in normalized]
+    lines.append("assistant:")
+    return "\n".join(lines)
+
+
+def question_token_count(question: Any, tokenizer: Any) -> int:
+    rendered = render_question_for_tokenizer(question, tokenizer)
+    return len(tokenizer.encode(rendered, add_special_tokens=True))
+
+
 def choose_indices(total_rows: int, subset_size: int, seed: int, selection_strategy: str) -> List[int]:
     if subset_size <= 0:
         raise ValueError("--subset_size must be greater than 0.")
@@ -158,6 +227,8 @@ def write_json(path: Path, payload: Dict[str, Any]) -> None:
 
 def main() -> None:
     args = parse_args()
+    if args.max_question_tokens <= 0:
+        raise ValueError("--max_question_tokens must be greater than 0.")
 
     output_path = Path(args.output_path) if args.output_path else default_output_path(args)
     metadata_path = (
@@ -179,15 +250,15 @@ def main() -> None:
 
     split_dataset = dataset[args.split]
     total_rows = len(split_dataset)
-    selected_indices = choose_indices(
-        total_rows=total_rows,
-        subset_size=args.subset_size,
-        seed=args.seed,
-        selection_strategy=args.selection_strategy,
+    tokenizer = AutoTokenizer.from_pretrained(
+        args.tokenizer_name_or_path,
+        use_fast=False,
     )
 
-    subset_rows: List[Dict[str, Any]] = []
-    for subset_pos, source_idx in enumerate(selected_indices):
+    filtered_rows: List[Dict[str, Any]] = []
+    filtered_source_indices: List[int] = []
+    num_rows_filtered_out = 0
+    for source_idx in range(total_rows):
         row = to_jsonable(dict(split_dataset[int(source_idx)]))
         if not isinstance(row, dict):
             raise ValueError(
@@ -199,8 +270,35 @@ def main() -> None:
             split=args.split,
             row_idx=source_idx,
         )
+        token_count = question_token_count(row["question"], tokenizer)
+        if token_count > args.max_question_tokens:
+            num_rows_filtered_out += 1
+            continue
         row["_source_index"] = int(source_idx)
+        row["_question_token_count"] = int(token_count)
+        filtered_rows.append(row)
+        filtered_source_indices.append(source_idx)
+
+    filtered_total_rows = len(filtered_rows)
+    if filtered_total_rows == 0:
+        raise ValueError(
+            f"No rows remain after filtering {args.hf_dataset_name}:{args.split} with "
+            f"--max_question_tokens={args.max_question_tokens}."
+        )
+
+    selected_indices = choose_indices(
+        total_rows=filtered_total_rows,
+        subset_size=args.subset_size,
+        seed=args.seed,
+        selection_strategy=args.selection_strategy,
+    )
+
+    subset_rows: List[Dict[str, Any]] = []
+    selected_source_indices: List[int] = []
+    for subset_pos, filtered_idx in enumerate(selected_indices):
+        row = dict(filtered_rows[int(filtered_idx)])
         row["_subset_index"] = int(subset_pos)
+        selected_source_indices.append(int(row["_source_index"]))
         subset_rows.append(row)
 
     write_jsonl(output_path, subset_rows)
@@ -211,8 +309,14 @@ def main() -> None:
         "subset_size": args.subset_size,
         "seed": args.seed,
         "selection_strategy": args.selection_strategy,
+        "tokenizer_name_or_path": args.tokenizer_name_or_path,
+        "max_question_tokens": args.max_question_tokens,
         "source_num_rows": total_rows,
-        "selected_indices": selected_indices,
+        "rows_after_question_filter": filtered_total_rows,
+        "rows_filtered_out_by_question_length": num_rows_filtered_out,
+        "filtered_source_indices": filtered_source_indices,
+        "selected_filtered_indices": selected_indices,
+        "selected_source_indices": selected_source_indices,
         "output_path": str(output_path),
         "question_field": "question",
         "answer_field": "answer",
