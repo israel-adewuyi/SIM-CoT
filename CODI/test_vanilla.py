@@ -78,8 +78,10 @@ def normalize_content(content: Any) -> str:
 
 
 def render_chat_prompt(messages: Any, tokenizer: Any) -> str:
+    if isinstance(messages, str):
+        return messages.strip()
     if not isinstance(messages, list):
-        raise ValueError("Each sample 'question' must be a list of {role, content}.")
+        raise ValueError("Each sample 'question' must be a string or a list of {role, content}.")
     normalized: List[Dict[str, str]] = []
     for idx, message in enumerate(messages):
         if not isinstance(message, dict):
